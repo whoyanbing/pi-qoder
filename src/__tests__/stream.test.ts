@@ -190,6 +190,59 @@ describe("streamQoder", () => {
     expect(msg.usage.cacheWrite).toBe(10);
   });
 
+  it("ignores a zero-token usage chunk so the footer does not flash to 0%", async () => {
+    const sse =
+      sseEnvelope(
+        chunk(
+          { content: "a", role: "assistant" },
+          { usage: { prompt_tokens: 100, completion_tokens: 1, total_tokens: 101 } },
+        ),
+      ) +
+      sseEnvelope(
+        chunk(
+          { content: "b", role: "assistant" },
+          { usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } },
+        ),
+      ) +
+      sseEnvelope(
+        finishChunk("stop", {
+          usage: { prompt_tokens: 100, completion_tokens: 5, total_tokens: 105 },
+        }),
+      ) +
+      DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const inputSnapshots: number[] = [];
+    let doneMessage: AssistantMessage | undefined;
+    for await (const ev of streamQoder(makeModel(), makeContext(), { apiKey: "fake" })) {
+      if (ev.type === "text_delta") inputSnapshots.push(ev.partial.usage.input);
+      if (ev.type === "done") {
+        doneMessage = ev.message;
+        break;
+      }
+      if (ev.type === "error") break;
+    }
+    expect(inputSnapshots).toEqual([100, 100]);
+    expect(doneMessage?.usage.input).toBe(100);
+    expect(doneMessage?.usage.output).toBe(5);
+    expect(doneMessage?.usage.totalTokens).toBe(105);
+  });
+
+  it("uses a stable session_id fallback when Pi does not pass sessionId", async () => {
+    const bodies: string[] = [];
+    globalThis.fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      bodies.push(Buffer.from(init?.body as Uint8Array).toString("utf8"));
+      return new Response(SUCCESS_SSE, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+    await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const ids = bodies.map((encoded) => {
+      const parsed = JSON.parse(qoderDecodeBody(encoded).toString("utf8")) as { session_id: string };
+      return parsed.session_id;
+    });
+    expect(ids[0]).toBeTruthy();
+    expect(ids[0]).toBe(ids[1]);
+  });
+
   it("reports a tool_use stop reason when the stream emits tool calls", async () => {
     const sse =
       sseEnvelope(

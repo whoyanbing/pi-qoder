@@ -262,6 +262,79 @@ describe("transformMessagesForQoder", () => {
     expect(parts[2].image_url?.url).toBe("data:image/jpeg;base64,two");
   });
 
+  it("strips historical user images and keeps the current turn", () => {
+    const msgs = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "old shot" },
+          { type: "image", data: "oldpng", mimeType: "image/png" },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "saw it" }] },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "new shot" },
+          { type: "image", data: "newpng", mimeType: "image/png" },
+        ],
+      },
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(msgs);
+    expect(result).toHaveLength(3);
+    expect(result[0].content).toBe(
+      "old shot\n\n[1 image attachment(s) from this earlier turn are not replayed.]",
+    );
+    const current = result[2].content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    expect(current).toHaveLength(2);
+    expect(current[1].image_url?.url).toBe("data:image/png;base64,newpng");
+  });
+
+  it("strips historical tool images and keeps in-flight tool images", () => {
+    const historical = [
+      { role: "user", content: "look" },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_old", name: "read", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_old",
+        content: [
+          { type: "text", text: "old tool image" },
+          { type: "image", data: "oldtool", mimeType: "image/png" },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      { role: "user", content: "again" },
+    ] as unknown as Message[];
+    const stripped = transformMessagesForQoder(historical);
+    expect(stripped.map((m) => m.role)).toEqual(["user", "assistant", "tool", "assistant", "user"]);
+    expect(stripped[2].content).toContain("old tool image");
+    expect(stripped[2].content).toContain("[1 image(s) in this earlier tool result are not replayed.]");
+    expect(JSON.stringify(stripped)).not.toContain("oldtool");
+
+    const inFlight = [
+      { role: "user", content: "look" },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_now", name: "read", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_now",
+        content: [
+          { type: "text", text: "current tool image" },
+          { type: "image", data: "nowtool", mimeType: "image/png" },
+        ],
+      },
+    ] as unknown as Message[];
+    const kept = transformMessagesForQoder(inFlight);
+    expect(kept.map((m) => m.role)).toEqual(["user", "assistant", "tool", "user"]);
+    const parts = kept[3].content as Array<{ type: string; image_url?: { url: string } }>;
+    expect(parts[1].image_url?.url).toBe("data:image/png;base64,nowtool");
+  });
+
   it("adds no extra message when a tool result has no images", () => {
     // The common case by far; it must stay a single `tool` message.
     const msgs = [

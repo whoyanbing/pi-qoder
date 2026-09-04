@@ -19,7 +19,7 @@ import { MAX_OUTPUT_TOKENS, USER_EMAIL_FALLBACK, USER_NAME_FALLBACK, getChatURL 
 import { buildAuthHeaders, getMachineId } from "../cosy.js";
 import { qoderEncodeBody } from "./encoding.js";
 import { stripThinkingTags, ThinkingTagParser } from "./thinking.js";
-import { contentToText, transformMessagesForQoder, transformTools } from "./transform.js";
+import { contentToText, getContentImages, getContentText, transformMessagesForQoder, transformTools } from "./transform.js";
 
 interface ToolCallState {
   arguments: string;
@@ -149,9 +149,13 @@ export function streamQoder(
       }
 
       const stablePart = stableHash("qoder-session", userID, qoderModel);
+      const firstUser = context.messages.find((m) => m.role === "user");
+      const firstUserFingerprint = firstUser
+        ? `${getContentText(firstUser)}|images=${getContentImages(firstUser).length}`
+        : "";
       const sessionID = options?.sessionId
         ? `${stablePart}-${options.sessionId}`
-        : `${stablePart}-${crypto.randomUUID()}`;
+        : `${stablePart}-${stableHash("qoder-conv", firstUserFingerprint)}`;
 
       let maxTokens = MAX_OUTPUT_TOKENS;
       if (options?.maxTokens && options.maxTokens < maxTokens) {
@@ -355,13 +359,16 @@ export function streamQoder(
             if (inner.model) output.responseModel = inner.model;
             if (inner.usage) {
               const promptTokens = inner.usage.prompt_tokens ?? 0;
-              const cacheReadTokens = inner.usage.prompt_tokens_details?.cached_tokens ?? 0;
-              const cacheWriteTokens = inner.usage.prompt_tokens_details?.cache_write_tokens ?? 0;
-              output.usage.input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
-              output.usage.output = inner.usage.completion_tokens ?? 0;
-              output.usage.totalTokens = inner.usage.total_tokens ?? 0;
-              output.usage.cacheRead = cacheReadTokens;
-              output.usage.cacheWrite = cacheWriteTokens;
+              // Keep-alive / mid-stream zeros must not flash the footer to 0%.
+              if (promptTokens > 0) {
+                const cacheReadTokens = inner.usage.prompt_tokens_details?.cached_tokens ?? 0;
+                const cacheWriteTokens = inner.usage.prompt_tokens_details?.cache_write_tokens ?? 0;
+                output.usage.input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
+                output.usage.output = inner.usage.completion_tokens ?? 0;
+                output.usage.totalTokens = inner.usage.total_tokens ?? 0;
+                output.usage.cacheRead = cacheReadTokens;
+                output.usage.cacheWrite = cacheWriteTokens;
+              }
             }
 
             const choice = inner.choices?.[0];

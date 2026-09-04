@@ -39,6 +39,38 @@ describe("qoderEncodeBody", () => {
     expect(result).toBe("");
   });
 
+  it("stays wire-compatible with the original rearrange+map codec", () => {
+    const custom = "_doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!";
+    const stdAlpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    function legacyEncode(plaintext: string | Buffer): string {
+      const std = Buffer.isBuffer(plaintext) ? plaintext.toString("base64") : Buffer.from(plaintext).toString("base64");
+      const n = std.length;
+      const a = Math.floor(n / 3);
+      const rearranged = std.slice(n - a) + std.slice(a, n - a) + std.slice(0, a);
+      let out = "";
+      for (let i = 0; i < n; i++) {
+        const c = rearranged[i];
+        if (c === "=") out += "$";
+        else {
+          const idx = stdAlpha.indexOf(c);
+          out += idx >= 0 ? custom[idx] : c;
+        }
+      }
+      return out;
+    }
+    const samples: Array<string | Buffer> = ["hello", "a", "The quick brown fox", Buffer.from([0x00, 0xff, 0x80]), JSON.stringify({ n: 42 })];
+    for (const sample of samples) {
+      expect(qoderEncodeBody(sample)).toBe(legacyEncode(sample));
+    }
+  });
+
+  it("round-trips a larger buffer", () => {
+    const binary = Buffer.alloc(100_000);
+    for (let i = 0; i < binary.length; i++) binary[i] = (i * 37) & 0xff;
+    const encoded = qoderEncodeBody(binary);
+    expect(qoderDecodeBody(encoded).equals(binary)).toBe(true);
+  });
+
   it("replaces '=' padding with '$'", () => {
     // Base64 of "a" is "YQ==" which has padding — our encoding should use $
     const result = qoderEncodeBody("a");
