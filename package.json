@@ -1,0 +1,28 @@
+{
+  "name": "pi-qoder",
+  "version": "0.1.0",
+  "description": "Pi extension for Qoder AI — OAuth/PAT login, COSY signatures, and streaming chat",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "pi", "qoder", "ai", "provider"],
+  "files": ["src", "README.md"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.4",
+    "@earendil-works/pi-coding-agent": "^0.84.4",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.9"
+  }
+}
