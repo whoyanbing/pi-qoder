@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { getDeviceLoginURL, getDevicePollURL, getUserInfoURL, USER_AGENT } from "../config.js";
 import { getMachineId } from "../cosy.js";
+import { fetchWithTimeout, readResponseTextLimited } from "../network.js";
 import { credentialsFromPat } from "./pat.js";
 
 function getPrompt(callbacks: OAuthLoginCallbacks) {
@@ -51,7 +52,7 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 async function patLogin(callbacks: OAuthLoginCallbacks, providedPat: string): Promise<OAuthCredentials> {
   if (!providedPat) throw new Error("No Personal Access Token provided");
   getProgress(callbacks)?.("Exchanging access token...");
-  const creds = await credentialsFromPat(providedPat);
+  const creds = await credentialsFromPat(providedPat, getSignal(callbacks));
   getProgress(callbacks)?.("Login successful!");
   return creds;
 }
@@ -76,15 +77,18 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
     await abortableDelay(2000, getSignal(callbacks));
 
     try {
-      const response = await fetch(pollURL, {
-        method: "GET",
-        headers: { Accept: "application/json", "User-Agent": USER_AGENT },
-        signal: getSignal(callbacks),
-      });
+      const response = await fetchWithTimeout(
+        pollURL,
+        {
+          method: "GET",
+          headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+        },
+        { signal: getSignal(callbacks), label: "Qoder device-token poll" },
+      );
 
       if (response.status === 202 || response.status === 404) continue;
       if (!response.ok) {
-        const errText = await response.text();
+        const errText = await readResponseTextLimited(response);
         throw new Error(`Device token poll failed: ${response.status} ${response.statusText}. Response: ${errText}`);
       }
 
@@ -96,19 +100,24 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
         expires_in?: number;
       };
       if (!tokenData.token) throw new Error("Device token poll returned empty access token");
+      if (!tokenData.user_id) throw new Error("Device token poll returned empty user id");
 
       getProgress(callbacks)?.("Fetching user profile...");
       let email = "";
       let name = "";
       try {
-        const userinfoRes = await fetch(getUserInfoURL(), {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${tokenData.token}`,
-            Accept: "application/json",
-            "User-Agent": USER_AGENT,
+        const userinfoRes = await fetchWithTimeout(
+          getUserInfoURL(),
+          {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${tokenData.token}`,
+              Accept: "application/json",
+              "User-Agent": USER_AGENT,
+            },
           },
-        });
+          { signal: getSignal(callbacks), label: "Qoder user-profile request" },
+        );
         if (userinfoRes.ok) {
           const userinfo = (await userinfoRes.json()) as { email?: string; name?: string; username?: string };
           email = userinfo.email || "";
@@ -120,7 +129,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
       return {
         refresh: `${tokenData.refresh_token}|${tokenData.user_id}|${machineID}`,
         access: tokenData.token,
-        expires: parseExpiresAt(tokenData.expires_at, tokenData.expires_in) - 5 * 60 * 1000,
+        expires: Math.max(Date.now(), parseExpiresAt(tokenData.expires_at, tokenData.expires_in) - 5 * 60 * 1000),
         userID: tokenData.user_id,
         email,
         name,

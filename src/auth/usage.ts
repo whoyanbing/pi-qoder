@@ -1,5 +1,6 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { QODER_MANAGE_URL, USAGE_TITLE, USER_AGENT, getUsageURL } from "../config.js";
+import { fetchWithTimeout } from "../network.js";
 
 interface QoderQuota {
   /** Personal plan limit. Absent for org/team packages, which use `cap`. */
@@ -64,15 +65,22 @@ function percent(fraction: number): string {
   return `${Math.round(fraction * 100)}%`;
 }
 
-export async function fetchQoderUsage(credentials: OAuthCredentials): Promise<QoderProviderUsage> {
-  const response = await fetch(getUsageURL(), {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${credentials.access}`,
-      Accept: "application/json",
-      "User-Agent": USER_AGENT,
+export async function fetchQoderUsage(
+  credentials: OAuthCredentials,
+  signal?: AbortSignal,
+): Promise<QoderProviderUsage> {
+  const response = await fetchWithTimeout(
+    getUsageURL(),
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${credentials.access}`,
+        Accept: "application/json",
+        "User-Agent": USER_AGENT,
+      },
     },
-  });
+    { signal, label: "Qoder usage request" },
+  );
 
   if (!response.ok) {
     throw new Error(`Failed to fetch Qoder usage: ${response.status} ${response.statusText}`);

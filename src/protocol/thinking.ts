@@ -38,6 +38,10 @@ export function stripThinkingTags(text: string): string {
   return out;
 }
 
+/**
+ * Incremental parser for providers that embed one thinking block in content.
+ * Blocks are append-only: once a contentIndex is emitted it is never shifted.
+ */
 export class ThinkingTagParser {
   private textBuffer = "";
   private inThinking = false;
@@ -73,30 +77,38 @@ export class ThinkingTagParser {
   }
 
   finalize(): void {
-    if (this.textBuffer.length === 0) return;
-    if (this.inThinking && this.thinkingBlockIndex !== null) {
-      const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
-      block.thinking += this.textBuffer;
-      this.stream.push({
-        type: "thinking_delta",
-        contentIndex: this.thinkingBlockIndex,
-        delta: this.textBuffer,
-        partial: this.output,
-      });
-      this.stream.push({
-        type: "thinking_end",
-        contentIndex: this.thinkingBlockIndex,
-        content: block.thinking,
-        partial: this.output,
-      });
-    } else {
-      this.emitText(this.textBuffer);
+    if (this.textBuffer.length > 0) {
+      if (this.inThinking) this.emitThinking(this.textBuffer);
+      else this.emitText(this.textBuffer);
+      this.textBuffer = "";
     }
-    this.textBuffer = "";
+    if (this.inThinking) {
+      this.finishThinkingBlock();
+      this.inThinking = false;
+    }
+    this.finishTextBlock();
+  }
+
+  /** Close visible text before another block (tool call or reasoning) starts. */
+  finishTextBlock(): void {
+    if (this.textBlockIndex === null) return;
+    const index = this.textBlockIndex;
+    const block = this.output.content[index] as TextContent;
+    this.stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: this.output });
+    this.lastTextBlockIndex = index;
+    this.textBlockIndex = null;
   }
 
   getTextBlockIndex(): number | null {
     return this.textBlockIndex ?? this.lastTextBlockIndex;
+  }
+
+  private finishThinkingBlock(): void {
+    if (this.thinkingBlockIndex === null) return;
+    const index = this.thinkingBlockIndex;
+    const block = this.output.content[index] as ThinkingContent;
+    this.stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: this.output });
+    this.thinkingBlockIndex = null;
   }
 
   private processBeforeThinking(): void {
@@ -119,6 +131,7 @@ export class ThinkingTagParser {
 
     if (bestOpenVariant !== null && (bestCloseVariant === null || bestOpenPos < bestClosePos)) {
       if (bestOpenPos > 0) this.emitText(this.textBuffer.slice(0, bestOpenPos));
+      this.finishTextBlock();
       this.textBuffer = this.textBuffer.slice(bestOpenPos + bestOpenVariant.open.length);
       this.activeEndTag = bestOpenVariant.close;
       this.inThinking = true;
@@ -146,21 +159,12 @@ export class ThinkingTagParser {
     const endPos = this.textBuffer.indexOf(this.activeEndTag);
     if (endPos !== -1) {
       if (endPos > 0) this.emitThinking(this.textBuffer.slice(0, endPos));
-      if (this.thinkingBlockIndex !== null) {
-        const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;
-        this.stream.push({
-          type: "thinking_end",
-          contentIndex: this.thinkingBlockIndex,
-          content: block.thinking,
-          partial: this.output,
-        });
-      }
+      this.finishThinkingBlock();
       this.textBuffer = this.textBuffer.slice(endPos + this.activeEndTag.length);
       this.inThinking = false;
       this.thinkingExtracted = true;
-      this.lastTextBlockIndex = this.textBlockIndex;
-      this.textBlockIndex = null;
       if (this.textBuffer.startsWith("\n\n")) this.textBuffer = this.textBuffer.slice(2);
+      else if (this.textBuffer.startsWith("\n")) this.textBuffer = this.textBuffer.slice(1);
       return;
     }
 
@@ -191,15 +195,10 @@ export class ThinkingTagParser {
 
   private emitThinking(thinking: string): void {
     if (!thinking) return;
+    this.finishTextBlock();
     if (this.thinkingBlockIndex === null) {
-      if (this.textBlockIndex !== null) {
-        this.thinkingBlockIndex = this.textBlockIndex;
-        this.output.content.splice(this.thinkingBlockIndex, 0, { type: "thinking", thinking: "" });
-        this.textBlockIndex = this.textBlockIndex + 1;
-      } else {
-        this.thinkingBlockIndex = this.output.content.length;
-        this.output.content.push({ type: "thinking", thinking: "" });
-      }
+      this.thinkingBlockIndex = this.output.content.length;
+      this.output.content.push({ type: "thinking", thinking: "" });
       this.stream.push({ type: "thinking_start", contentIndex: this.thinkingBlockIndex, partial: this.output });
     }
     const block = this.output.content[this.thinkingBlockIndex] as ThinkingContent;

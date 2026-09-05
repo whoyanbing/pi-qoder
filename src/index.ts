@@ -6,6 +6,7 @@ import { fetchQoderUsage } from "./auth/usage.js";
 import { registerQoderCommands } from "./commands.js";
 import { getCachedModels, isCacheStale, toProviderModels, updateQoderModelsCache } from "./catalog.js";
 import { PROVIDER_ID, PROVIDER_NAME, QODER_API, QODER_BASE_URL } from "./config.js";
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "./network.js";
 import { streamQoder } from "./protocol/stream.js";
 
 type OAuthConfigWithUsage = NonNullable<ProviderConfig["oauth"]> & {
@@ -23,19 +24,22 @@ function registerQoderApi(): void {
   );
 }
 
-async function refreshCatalogFromCredentials(): Promise<void> {
+async function refreshCatalogFromCredentials(signal?: AbortSignal): Promise<void> {
   if (!isCacheStale()) return;
   const credentials = getCachedCredentials();
   if (!credentials?.access || !credentials.userID) return;
-  await updateQoderModelsCache(credentials.access, credentials.userID, credentials.name, credentials.email);
+  await updateQoderModelsCache(credentials.access, credentials.userID, credentials.name, credentials.email, signal);
 }
 
 export default async function (pi: ExtensionAPI) {
   registerQoderApi();
 
   try {
-    await autoLoginFromEnvironment();
-    await refreshCatalogFromCredentials();
+    // Bound the complete startup bootstrap, not just each individual request.
+    // A stale PAT or an unreachable Qoder service must not stall Pi startup.
+    const startupSignal = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
+    await autoLoginFromEnvironment(startupSignal);
+    await refreshCatalogFromCredentials(startupSignal);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[pi-qoder] Automatic login failed: ${message}`);
@@ -70,6 +74,7 @@ export default async function (pi: ExtensionAPI) {
         extra.userID || cached?.userID || "qoder-user",
         extra.name || cached?.name || "Qoder User",
         extra.email || cached?.email || "user@qoder.com",
+        context.signal,
       );
       const next = toProviderModels(models ?? getCachedModels());
       await context.publish({

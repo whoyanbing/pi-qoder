@@ -71,10 +71,10 @@ describe("ThinkingTagParser", () => {
     parser.processChunk("Hello <thinking>reasoning here</thinking> world");
     parser.finalize();
 
-    // Parser inserts thinking block before existing text via splice, then creates a new text block after
+    // Preserve stream order and stable content indexes; never splice a started block.
     expect(output.content).toHaveLength(3);
-    expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "reasoning here" });
-    expect(output.content[1]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[0]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[1]).toMatchObject({ type: "thinking", thinking: "reasoning here" });
     expect(output.content[2]).toMatchObject({ type: "text", text: " world" });
   });
 
@@ -95,8 +95,8 @@ describe("ThinkingTagParser", () => {
     parser.finalize();
 
     expect(output.content).toHaveLength(3);
-    expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "reasoning" });
-    expect(output.content[1]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[0]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[1]).toMatchObject({ type: "thinking", thinking: "reasoning" });
     expect(output.content[2]).toMatchObject({ type: "text", text: " world" });
   });
 
@@ -129,8 +129,8 @@ describe("ThinkingTagParser", () => {
     parser.finalize();
 
     expect(output.content).toHaveLength(3);
-    expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "part1 part2" });
-    expect(output.content[1]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[0]).toMatchObject({ type: "text", text: "Hello " });
+    expect(output.content[1]).toMatchObject({ type: "thinking", thinking: "part1 part2" });
     expect(output.content[2]).toMatchObject({ type: "text", text: " world" });
   });
 
@@ -141,8 +141,8 @@ describe("ThinkingTagParser", () => {
     parser.finalize();
 
     expect(output.content).toHaveLength(2);
-    expect(output.content[0]).toMatchObject({ type: "thinking", thinking: "body" });
-    expect(output.content[1]).toMatchObject({ type: "text", text: "text " });
+    expect(output.content[0]).toMatchObject({ type: "text", text: "text " });
+    expect(output.content[1]).toMatchObject({ type: "thinking", thinking: "body" });
   });
 
   // ── Multiple thinking blocks ──────────────────────────────────────────
@@ -208,6 +208,7 @@ describe("ThinkingTagParser", () => {
     const eventTypes = pushMock.mock.calls.map((c) => c[0].type);
     expect(eventTypes).toContain("text_start");
     expect(eventTypes).toContain("text_delta");
+    expect(eventTypes).toContain("text_end");
   });
 
   it("emits thinking_start and thinking_delta events for thinking content", () => {

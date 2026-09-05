@@ -318,8 +318,9 @@ describe("streamQoder", () => {
     const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
     const done = events.find((event) => event.type === "done") as { message: AssistantMessage };
     expect(done.message.content).toEqual([
-      { type: "text", text: "before after" },
+      { type: "text", text: "before" },
       { type: "toolCall", id: "call_1", name: "lookup", arguments: {} },
+      { type: "text", text: " after" },
     ]);
   });
 
@@ -405,6 +406,51 @@ describe("streamQoder", () => {
     expect(done).toBeDefined();
     const text = (done as { message: AssistantMessage }).message.content.find((c) => c.type === "text");
     expect(text && "text" in text ? text.text : "").toBe("hi");
+  });
+
+  it("emits text_end for every started text block", async () => {
+    const sse = sseEnvelope(chunk({ content: "hello", role: "assistant" })) + sseEnvelope(finishChunk("stop")) + DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const types = events.map((event) => event.type);
+    expect(types).toContain("text_start");
+    expect(types).toContain("text_end");
+    expect(types.indexOf("text_end")).toBeLessThan(types.indexOf("done"));
+  });
+
+  it("reports an error when the body closes without DONE or a finish reason", async () => {
+    globalThis.fetch = mockFetch(sseEnvelope(chunk({ content: "truncated", role: "assistant" })));
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const error = events.find((event) => event.type === "error") as { error: AssistantMessage };
+    expect(error.error.stopReason).toBe("error");
+    expect(error.error.errorMessage).toContain("closed before the response completed");
+    expect(events.find((event) => event.type === "done")).toBeUndefined();
+  });
+
+  it("rejects non-empty malformed tool arguments instead of executing with an empty object", async () => {
+    const sse =
+      sseEnvelope(chunk({ tool_calls: [{ index: 0, id: "call_bad", function: { name: "bash", arguments: '{"command":' } }] })) +
+      sseEnvelope(finishChunk("tool_calls")) +
+      DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const error = events.find((event) => event.type === "error") as { error: AssistantMessage };
+    expect(error.error.errorMessage).toContain("Invalid JSON arguments");
+    expect(events.find((event) => event.type === "done")).toBeUndefined();
+  });
+
+  it("merges caller headers without allowing COSY auth fields to be replaced", async () => {
+    globalThis.fetch = mockFetch(SUCCESS_SSE);
+    await consume(
+      streamQoder(makeModel(), makeContext(), {
+        apiKey: "fake",
+        headers: { "X-Trace": "trace-1", Authorization: "attacker" },
+      }),
+    );
+    const init = vi.mocked(globalThis.fetch).mock.calls[0][1];
+    const headers = new Headers(init?.headers);
+    expect(headers.get("X-Trace")).toBe("trace-1");
+    expect(headers.get("Authorization")).toMatch(/^Bearer COSY\./);
   });
 
   it("reports aborted when the request is cancelled before streaming starts", async () => {

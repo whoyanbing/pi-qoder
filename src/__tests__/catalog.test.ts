@@ -74,8 +74,12 @@ describe("contextWindowFromCatalog", () => {
     ).toBe(200000);
   });
 
-  it("falls back to 1M when the catalog omits context_config", () => {
-    expect(contextWindowFromCatalog({ key: "lite", max_input_tokens: 180000 })).toBe(DEFAULT_CONTEXT_WINDOW);
+  it("uses max_input_tokens when the catalog omits context_config", () => {
+    expect(contextWindowFromCatalog({ key: "lite", max_input_tokens: 180000 })).toBe(180000);
+  });
+
+  it("falls back to 1M when the catalog omits every context limit", () => {
+    expect(contextWindowFromCatalog({ key: "lite" })).toBe(DEFAULT_CONTEXT_WINDOW);
   });
 });
 

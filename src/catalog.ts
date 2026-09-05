@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
@@ -15,6 +15,7 @@ import {
   getModelListURL,
 } from "./config.js";
 import { buildAuthHeaders } from "./cosy.js";
+import { fetchWithTimeout } from "./network.js";
 
 export { DEFAULT_CONTEXT_WINDOW, MAX_OUTPUT_TOKENS, ZERO_COST } from "./config.js";
 
@@ -286,11 +287,13 @@ export function contextWindowFromCatalog(entry: QoderModelEntry): number {
   if (contextConfig && typeof contextConfig === "object") {
     let advertised = 0;
     for (const configVal of Object.values(contextConfig)) {
-      if (configVal && typeof configVal === "object" && typeof configVal.token_count === "number") {
-        if (configVal.token_count > advertised) advertised = configVal.token_count;
-      }
+      const count = configVal?.token_count;
+      if (Number.isFinite(count) && count! > 0) advertised = Math.max(advertised, Math.floor(count!));
     }
     if (advertised > 0) return advertised;
+  }
+  if (Number.isFinite(entry.max_input_tokens) && entry.max_input_tokens! > 0) {
+    return Math.floor(entry.max_input_tokens!);
   }
   return DEFAULT_CONTEXT_WINDOW;
 }
@@ -420,14 +423,20 @@ export async function updateQoderModelsCache(
   userID: string,
   name: string,
   email: string,
+  signal?: AbortSignal,
 ): Promise<QoderModelDef[] | undefined> {
   const modelListURL = getModelListURL();
+  let tempPath: string | undefined;
   try {
     const headers = buildAuthHeaders(null, modelListURL, { userID, authToken, name, email });
-    const response = await fetch(modelListURL, {
-      method: "GET",
-      headers: { Accept: "application/json", ...headers },
-    });
+    const response = await fetchWithTimeout(
+      modelListURL,
+      {
+        method: "GET",
+        headers: { Accept: "application/json", ...headers },
+      },
+      { signal, label: "Qoder model catalog request" },
+    );
     if (!response.ok) return undefined;
 
     const resData = (await response.json()) as { chat?: QoderModelEntry[] };
@@ -465,13 +474,22 @@ export async function updateQoderModelsCache(
 
     const cachePath = getCachePath();
     mkdirSync(dirname(cachePath), { recursive: true });
-    writeFileSync(
-      cachePath,
-      JSON.stringify({ updatedAt: Date.now(), models: newModels, configs }, null, 2),
-      "utf-8",
-    );
+    tempPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tempPath, JSON.stringify({ updatedAt: Date.now(), models: newModels, configs }, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    renameSync(tempPath, cachePath);
+    tempPath = undefined;
     return newModels;
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     return undefined;
+  } finally {
+    if (tempPath) {
+      try {
+        unlinkSync(tempPath);
+      } catch {}
+    }
   }
 }
