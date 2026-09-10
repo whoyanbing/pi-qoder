@@ -17,7 +17,7 @@ describe("refreshQoderToken", () => {
   it("throws on OAuth refresh failure instead of extending an expired token", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(new Response("unauthorized", { status: 401, statusText: "Unauthorized" })),
+      vi.fn().mockImplementation(async () => new Response("unauthorized", { status: 401, statusText: "Unauthorized" })),
     );
 
     await expect(refreshQoderToken(baseCredentials)).rejects.toThrow("Qoder OAuth refresh failed: 401");

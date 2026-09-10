@@ -34,17 +34,6 @@ async function refreshCatalogFromCredentials(signal?: AbortSignal): Promise<void
 export default async function (pi: ExtensionAPI) {
   registerQoderApi();
 
-  try {
-    // Bound the complete startup bootstrap, not just each individual request.
-    // A stale PAT or an unreachable Qoder service must not stall Pi startup.
-    const startupSignal = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
-    await autoLoginFromEnvironment(startupSignal);
-    await refreshCatalogFromCredentials(startupSignal);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`[pi-qoder] Automatic login failed: ${message}`);
-  }
-
   const oauth: OAuthConfigWithUsage = {
     name: "Qoder (Browser OAuth / PAT)",
     isSubscription: true,
@@ -93,4 +82,16 @@ export default async function (pi: ExtensionAPI) {
   });
 
   registerQoderCommands(pi);
+
+  // Bootstrap in background: never block pi startup on Qoder network.
+  void (async () => {
+    try {
+      const startupSignal = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
+      await autoLoginFromEnvironment(startupSignal);
+      await refreshCatalogFromCredentials(startupSignal);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[pi-qoder] background login/catalog refresh failed: ${message}`);
+    }
+  })();
 }

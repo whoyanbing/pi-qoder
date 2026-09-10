@@ -1,9 +1,9 @@
-import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { getCachedCredentials } from "./auth/credentials.js";
 import { isPatRefresh } from "./auth/pat.js";
 import { fetchQoderUsage, type QoderProviderUsage } from "./auth/usage.js";
-import { getCatalogCacheInfo, getCachedModels, type QoderModelDef } from "./catalog.js";
+import { getCatalogCacheInfo, getCachedModels, isCacheStale, lastCatalogRefresh, updateQoderModelsCache, type QoderModelDef } from "./catalog.js";
+import { lastStreamDiag } from "./protocol/stream.js";
 import {
   PAT_ENV_NAMES,
   PROVIDER_ID,
@@ -47,7 +47,7 @@ function formatUsage(usage: QoderProviderUsage): string {
   return lines.join("\n");
 }
 
-const THINKING_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+import { PI_THINKING_LEVELS as THINKING_LEVELS } from "./catalog.js";
 
 function formatThinkingLevels(model: QoderModelDef): string {
   const map = model.thinkingLevelMap;
@@ -116,12 +116,22 @@ function formatDoctor(): string {
     `catalogCache=${cache.count} models, ${cache.updatedAt === null ? "no cache file (static fallback)" : `age ${cache.ageSeconds}s`}, stale=${cache.stale ? "yes" : "no"}`,
   );
   lines.push("transport=qoder sse (COSY-signed)");
-  lines.push("commands=/qoder.usage /qoder.model /qoder.doctor");
+  if (lastCatalogRefresh.at !== null) {
+    lines.push(
+      `lastRefresh=${Math.round((Date.now() - lastCatalogRefresh.at) / 1000)}s ago, latency=${lastCatalogRefresh.latencyMs ?? "?"}ms, error=${lastCatalogRefresh.error ?? "none"}`,
+    );
+  }
+  if (lastStreamDiag.at !== null) {
+    lines.push(
+      `lastStreamError=${Math.round((Date.now() - lastStreamDiag.at) / 1000)}s ago: ${(lastStreamDiag.error ?? "").slice(0, 160)}`,
+    );
+  }
+  lines.push("commands=/qoder.usage /qoder.model /qoder.refresh /qoder.doctor");
   if (!creds && !patEnv) {
     lines.push("hint=Run /login qoder to authenticate");
   }
   if (creds && cache.stale) {
-    lines.push("hint=Model cache is stale; run /qoder.model after /model refresh or restart pi");
+    lines.push("hint=Model cache is stale; run /qoder.refresh");
   }
   return lines.join("\n");
 }
@@ -148,7 +158,28 @@ export function registerQoderCommands(pi: ExtensionAPI): void {
   pi.registerCommand("qoder.model", {
     description: "List Qoder models registered by this provider",
     handler: async (args, ctx) => {
-      notify(ctx, formatModelList(getCachedModels(), args));
+      const cache = getCatalogCacheInfo();
+      const age = cache.updatedAt === null ? "static fallback (no cache file)" : `cache age ${cache.ageSeconds}s, stale=${cache.stale ? "yes" : "no"}`;
+      notify(ctx, `${formatModelList(getCachedModels(), args)}\n\n[${age}]`);
+    },
+  });
+
+  pi.registerCommand("qoder.refresh", {
+    description: "Force refresh Qoder model catalog from server",
+    handler: async (_args, ctx) => {
+      const creds = getCachedCredentials();
+      if (!creds?.access || !creds.userID) {
+        notify(ctx, "Qoder refresh unavailable: not logged in. Run /login qoder first.", "error");
+        return;
+      }
+      try {
+        const models = await updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email);
+        notify(ctx, models ? `Qoder catalog refreshed: ${models.length} models.` : "Qoder refresh returned no models; kept existing cache.");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        notify(ctx, `Qoder refresh failed: ${message}`, "error");
+      }
+      if (isCacheStale()) return;
     },
   });
 

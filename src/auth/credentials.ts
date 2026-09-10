@@ -29,18 +29,13 @@ const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
 const identityCache = new Map<string, QoderCredentials>();
 
 function acquireAuthLock(): () => void {
-  const maxAttempts = 10;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= 10; attempt++) {
     try {
       return lockfile.lockSync(AUTH_FILE, { realpath: false, stale: 30_000 });
     } catch (error) {
-      const code =
-        error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
-      if (code !== "ELOCKED" || attempt === maxAttempts) throw error;
-      const deadline = Date.now() + 20;
-      while (Date.now() < deadline) {
-        // Match Pi's synchronous auth-storage retry policy.
-      }
+      const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
+      if (code !== "ELOCKED" || attempt === 10) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
     }
   }
   throw new Error("Failed to acquire Pi auth storage lock");
@@ -96,13 +91,6 @@ export function getCachedCredentials(providerID = PROVIDER_ID): QoderCredentials
       return stored as unknown as QoderCredentials;
     }
   } catch {}
-  if (existsSync(AUTH_FILE)) {
-    try {
-      const auth = JSON.parse(readFileSync(AUTH_FILE, "utf-8"));
-      const creds = auth?.[providerID];
-      if (creds?.userID || creds?.access) return creds as QoderCredentials;
-    } catch {}
-  }
   return null;
 }
 
@@ -133,7 +121,9 @@ export async function resolveQoderIdentity(
 }
 
 function scheduleCatalogRefresh(creds: QoderCredentials, signal?: AbortSignal): void {
-  updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email, signal).catch(() => {});
+  updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email, signal).catch((e) => {
+    console.warn(`[pi-qoder] background catalog refresh failed: ${e instanceof Error ? e.message : String(e)}`);
+  });
 }
 
 export async function autoLoginFromEnvironment(signal?: AbortSignal): Promise<void> {
@@ -150,7 +140,12 @@ export async function loginQoder(callbacks: OAuthLoginCallbacks): Promise<OAuthC
   if (pat) {
     try {
       const creds = await credentialsFromPat(pat, callbacks.signal);
-      scheduleCatalogRefresh(creds as QoderCredentials, callbacks.signal);
+      try {
+        const q = creds as QoderCredentials;
+        await updateQoderModelsCache(q.access, q.userID, q.name, q.email, callbacks.signal);
+      } catch (e) {
+        console.warn(`[pi-qoder] catalog refresh after login failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
       return creds;
     } catch (error) {
       if (callbacks.signal?.aborted) throw error;
@@ -160,7 +155,12 @@ export async function loginQoder(callbacks: OAuthLoginCallbacks): Promise<OAuthC
   }
 
   const creds = await interactiveLogin(callbacks);
-  scheduleCatalogRefresh(creds as QoderCredentials, callbacks.signal);
+  try {
+    const q = creds as QoderCredentials;
+    await updateQoderModelsCache(q.access, q.userID, q.name, q.email, callbacks.signal);
+  } catch (e) {
+    console.warn(`[pi-qoder] catalog refresh after login failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
   return creds;
 }
 
@@ -192,20 +192,24 @@ export async function refreshQoderToken(
     throw new Error("Qoder OAuth refresh data is incomplete. Run /login qoder again.");
   }
 
-  const response = await fetchWithTimeout(
+  const refreshBody = JSON.stringify({ refreshToken });
+  const baseHeaders = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "User-Agent": USER_AGENT,
+  };
+  let response = await fetchWithTimeout(
     getRefreshURL(),
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${credentials.access}`,
-        Accept: "application/json",
-        "User-Agent": USER_AGENT,
-      },
-      body: JSON.stringify({ refreshToken }),
-    },
+    { method: "POST", headers: { ...baseHeaders, Authorization: `Bearer ${credentials.access}` }, body: refreshBody },
     { signal, label: "Qoder OAuth refresh" },
   );
+  if ((response.status === 401 || response.status === 403) && credentials.access) {
+    response = await fetchWithTimeout(
+      getRefreshURL(),
+      { method: "POST", headers: baseHeaders, body: refreshBody },
+      { signal, label: "Qoder OAuth refresh (no auth)" },
+    );
+  }
 
   if (!response.ok) {
     const body = await readResponseTextLimited(response).catch(() => "");

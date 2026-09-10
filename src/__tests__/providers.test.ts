@@ -50,7 +50,7 @@ describe("provider registration", () => {
     expect([...providers.keys()]).toEqual(["qoder"]);
     expect(providers.get("qoder")?.baseUrl).toBe("https://api3.qoder.sh/");
     expect(providers.has("qoder-cn")).toBe(false);
-    expect([...commands.keys()].sort()).toEqual(["qoder.doctor", "qoder.model", "qoder.usage"]);
+    expect([...commands.keys()].sort()).toEqual(["qoder.doctor", "qoder.model", "qoder.refresh", "qoder.usage"]);
 
     const fetchMock = vi.fn().mockImplementation(
       async () =>

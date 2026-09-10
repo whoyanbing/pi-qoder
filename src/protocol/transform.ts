@@ -54,15 +54,23 @@ export function getContentImages(msg: Message): ImageContent[] {
   return msg.content.filter((c): c is ImageContent => c.type === "image");
 }
 
+const MAX_QODER_TOOLS = 128;
 export function transformTools(tools: Tool[]): QoderTool[] {
-  return tools.map((t) => ({
-    type: "function",
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    },
-  }));
+  const seen = new Set<string>();
+  const out: QoderTool[] = [];
+  for (const t of tools) {
+    const clean = (t.name || "tool").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
+    let name = clean;
+    for (let i = 2; seen.has(name); i++) name = `${clean.slice(0, 60)}_${i}`;
+    seen.add(name);
+    if (name !== t.name) console.warn(`[pi-qoder] tool renamed for gateway: ${t.name} -> ${name}`);
+    out.push({ type: "function", function: { name, description: t.description, parameters: t.parameters } });
+    if (out.length >= MAX_QODER_TOOLS) {
+      console.warn(`[pi-qoder] ${tools.length} tools exceed gateway cap ${MAX_QODER_TOOLS}, truncated`);
+      break;
+    }
+  }
+  return out;
 }
 
 function lastUserIndex(messages: Message[]): number {
@@ -84,7 +92,7 @@ function toolImageNote(count: number): string {
   return `[${count} image(s) in this earlier tool result are not replayed.]`;
 }
 
-export function transformMessagesForQoder(messages: Message[]): QoderMessage[] {
+export function transformMessagesForQoder(messages: Message[], preserveAllImages = false): QoderMessage[] {
   const normalizedMessages: QoderMessage[] = [];
   const droppedToolCallIds = new Set<string>();
   const currentUserIndex = lastUserIndex(messages);
@@ -117,7 +125,7 @@ export function transformMessagesForQoder(messages: Message[]): QoderMessage[] {
         content = msg.content;
       } else if (Array.isArray(msg.content)) {
         const images = getContentImages(msg);
-        if (images.length > 0 && i !== currentUserIndex) {
+        if (images.length > 0 && !preserveAllImages && i !== currentUserIndex) {
           const text = getContentText(msg);
           const note = userImageNote(images.length);
           content = text ? `${text}\n\n${note}` : note;
@@ -170,7 +178,7 @@ export function transformMessagesForQoder(messages: Message[]): QoderMessage[] {
     } else if (msg.role === "toolResult") {
       const tr = msg as ToolResultMessage;
       const images = getContentImages(tr);
-      const replayImages = images.length > 0 && i > currentUserIndex;
+      const replayImages = images.length > 0 && (preserveAllImages || i > currentUserIndex);
       const text = getContentText(tr);
       normalizedMessages.push({
         role: "tool",

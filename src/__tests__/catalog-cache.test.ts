@@ -34,7 +34,8 @@ describe("Qoder model cache", () => {
       expect(cache.configs[friendlyId]?.key).toBe(entry.key);
       expect(cache.configs[entry.key]).toBeUndefined();
       expect(getCachedModelConfig(friendlyId)?.key).toBe(entry.key);
-      expect(getCachedModelConfig(entry.key)).toBeNull();
+      // case-insensitive fallback: raw key resolves to same entry
+      expect(getCachedModelConfig(entry.key)?.key).toBe(entry.key);
     }
   });
 
@@ -58,8 +59,9 @@ describe("Qoder model cache", () => {
     expect(getCachedModels().map((model) => model.id)).toEqual(["Lite", "Qwen3.8-Flash"]);
     expect(getCachedModelConfig("Lite")?.key).toBe("lite");
     expect(getCachedModelConfig("Qwen3.8-Flash")?.key).toBe("qfmodel");
-    expect(getCachedModelConfig("lite")).toBeNull();
-    expect(getCachedModelConfig("qfmodel")).toBeNull();
+    // case-insensitive fallback keeps raw keys usable
+    expect(getCachedModelConfig("lite")?.key).toBe("lite");
+    expect(getCachedModelConfig("qfmodel")?.key).toBe("qfmodel");
   });
 
   it("omits catalog entries without a friendly display name", async () => {

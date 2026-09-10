@@ -69,8 +69,8 @@ describe("registerQoderCommands", () => {
     vi.restoreAllMocks();
   });
 
-  it("registers qoder.usage, qoder.model and qoder.doctor with descriptions", () => {
-    expect([...pi.commands.keys()].sort()).toEqual(["qoder.doctor", "qoder.model", "qoder.usage"]);
+  it("registers qoder.usage, qoder.model, qoder.refresh and qoder.doctor with descriptions", () => {
+    expect([...pi.commands.keys()].sort()).toEqual(["qoder.doctor", "qoder.model", "qoder.refresh", "qoder.usage"]);
     for (const command of pi.commands.values()) {
       expect(command.description).toBeTruthy();
       expect(typeof command.handler).toBe("function");
@@ -181,7 +181,7 @@ describe("registerQoderCommands", () => {
       expect(message).toContain("credentials=none");
       expect(message).toContain("patEnv=unset");
       expect(message).toContain("catalogCache=");
-      expect(message).toContain("commands=/qoder.usage /qoder.model /qoder.doctor");
+      expect(message).toContain("commands=/qoder.usage /qoder.model /qoder.refresh /qoder.doctor");
       expect(message).toContain("hint=Run /login qoder to authenticate");
     });
 

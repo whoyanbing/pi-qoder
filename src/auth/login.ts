@@ -5,18 +5,6 @@ import { getMachineId } from "../cosy.js";
 import { fetchWithTimeout, readResponseTextLimited } from "../network.js";
 import { credentialsFromPat } from "./pat.js";
 
-function getPrompt(callbacks: OAuthLoginCallbacks) {
-  return callbacks.onPrompt;
-}
-
-function getProgress(callbacks: OAuthLoginCallbacks) {
-  return callbacks.onProgress;
-}
-
-function getSignal(callbacks: OAuthLoginCallbacks) {
-  return callbacks.signal;
-}
-
 export function generatePKCE() {
   const codeVerifier = crypto.randomBytes(32).toString("base64url");
   const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
@@ -51,9 +39,9 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 
 async function patLogin(callbacks: OAuthLoginCallbacks, providedPat: string): Promise<OAuthCredentials> {
   if (!providedPat) throw new Error("No Personal Access Token provided");
-  getProgress(callbacks)?.("Exchanging access token...");
-  const creds = await credentialsFromPat(providedPat, getSignal(callbacks));
-  getProgress(callbacks)?.("Login successful!");
+  callbacks.onProgress?.("Exchanging access token...");
+  const creds = await credentialsFromPat(providedPat, callbacks.signal);
+  callbacks.onProgress?.("Login successful!");
   return creds;
 }
 
@@ -63,7 +51,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
   const machineID = getMachineId();
   const verificationURI = getDeviceLoginURL(codeChallenge, machineID, nonce);
 
-  getProgress(callbacks)?.("Please complete login in your browser...");
+  callbacks.onProgress?.("Please complete login in your browser...");
   callbacks.onAuth({
     url: verificationURI,
     instructions: "Click to sign in with your Qoder account in the browser.",
@@ -73,8 +61,8 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
   const maxAttempts = 90;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (getSignal(callbacks)?.aborted) throw new Error("Login cancelled");
-    await abortableDelay(2000, getSignal(callbacks));
+    if (callbacks.signal?.aborted) throw new Error("Login cancelled");
+    await abortableDelay(2000, callbacks.signal);
 
     try {
       const response = await fetchWithTimeout(
@@ -83,7 +71,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
           method: "GET",
           headers: { Accept: "application/json", "User-Agent": USER_AGENT },
         },
-        { signal: getSignal(callbacks), label: "Qoder device-token poll" },
+        { signal: callbacks.signal, label: "Qoder device-token poll" },
       );
 
       if (response.status === 202 || response.status === 404) continue;
@@ -102,7 +90,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
       if (!tokenData.token) throw new Error("Device token poll returned empty access token");
       if (!tokenData.user_id) throw new Error("Device token poll returned empty user id");
 
-      getProgress(callbacks)?.("Fetching user profile...");
+      callbacks.onProgress?.("Fetching user profile...");
       let email = "";
       let name = "";
       try {
@@ -116,7 +104,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
               "User-Agent": USER_AGENT,
             },
           },
-          { signal: getSignal(callbacks), label: "Qoder user-profile request" },
+          { signal: callbacks.signal, label: "Qoder user-profile request" },
         );
         if (userinfoRes.ok) {
           const userinfo = (await userinfoRes.json()) as { email?: string; name?: string; username?: string };
@@ -125,7 +113,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
         }
       } catch {}
 
-      getProgress(callbacks)?.("Login successful!");
+      callbacks.onProgress?.("Login successful!");
       return {
         refresh: `${tokenData.refresh_token}|${tokenData.user_id}|${machineID}`,
         access: tokenData.token,
@@ -137,7 +125,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
       };
     } catch (e: unknown) {
       const err = e as { name?: string };
-      if (err.name === "AbortError" || getSignal(callbacks)?.aborted) throw new Error("Login cancelled");
+      if (err.name === "AbortError" || callbacks.signal?.aborted) throw new Error("Login cancelled");
       throw e;
     }
   }
@@ -146,12 +134,12 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
 }
 
 export async function interactiveLogin(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-  const pat = await getPrompt(callbacks)({
+  const pat = await callbacks.onPrompt({
     message: "Paste a Qoder Personal Access Token (pt-...), or leave empty for browser login",
     placeholder: "pt-...",
     allowEmpty: true,
   });
-  if (getSignal(callbacks)?.aborted) throw new Error("Login cancelled");
+  if (callbacks.signal?.aborted) throw new Error("Login cancelled");
   if (pat?.trim()) return patLogin(callbacks, pat.trim());
   return runDeviceFlow(callbacks);
 }

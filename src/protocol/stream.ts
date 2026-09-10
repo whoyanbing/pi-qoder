@@ -14,13 +14,33 @@ import {
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import { resolveQoderIdentity } from "../auth/credentials.js";
-import { getCachedModelConfig } from "../catalog.js";
+import { getCachedModelConfig, updateQoderModelsCache } from "../catalog.js";
 import { MAX_OUTPUT_TOKENS, USER_EMAIL_FALLBACK, USER_NAME_FALLBACK, getChatURL } from "../config.js";
 import { buildAuthHeaders, getMachineId } from "../cosy.js";
 import { readResponseTextLimited } from "../network.js";
 import { qoderEncodeBody } from "./encoding.js";
 import { stripThinkingTags, ThinkingTagParser } from "./thinking.js";
 import { contentToText, getContentImages, getContentText, transformMessagesForQoder, transformTools } from "./transform.js";
+
+const sessionFallbackCache = new Map<string, string>();
+
+export function __clearSessionFallbackCacheForTests(): void {
+  sessionFallbackCache.clear();
+}
+
+function resolveSessionID(stablePart: string, fingerprint: string): string {
+  const hit = sessionFallbackCache.get(`${stablePart}:${fingerprint}`);
+  if (hit) return hit;
+  const id = `${stablePart}-${crypto.randomUUID()}`;
+  sessionFallbackCache.set(`${stablePart}:${fingerprint}`, id);
+  if (sessionFallbackCache.size > 200) {
+    const oldest = sessionFallbackCache.keys().next();
+    if (!oldest.done) sessionFallbackCache.delete(oldest.value);
+  }
+  return id;
+}
+
+export const lastStreamDiag: { at: number | null; error: string | null } = { at: null, error: null };
 
 const MAX_SSE_BUFFER_BYTES = 4 * 1024 * 1024;
 const MAX_TOOL_ARGUMENT_BYTES = 1024 * 1024;
@@ -51,27 +71,14 @@ function stableChatRecordID(
   tools: unknown,
   maxTokens: number,
 ): string {
-  const hash = crypto.createHash("sha256");
-  hash.update("qoder-record");
-  hash.update("\0");
-  hash.update(model);
+  const parts: string[] = [model];
   for (const msg of messages) {
-    if (msg?.role) {
-      hash.update("\0");
-      hash.update(msg.role);
-    }
-    if (msg?.content) {
-      hash.update("\0");
-      hash.update(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
-    }
+    if (msg?.role) parts.push(msg.role);
+    if (msg?.content) parts.push(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
   }
-  if (tools) {
-    hash.update("\0");
-    hash.update(JSON.stringify(tools));
-  }
-  hash.update("\0");
-  hash.update(`mt=${maxTokens}`);
-  return hash.digest("hex").slice(0, 16);
+  if (tools) parts.push(JSON.stringify(tools));
+  parts.push(`mt=${maxTokens}`);
+  return stableHash("qoder-record", ...parts);
 }
 
 function emptyUsage() {
@@ -162,14 +169,21 @@ export function streamQoder(
       const email = ident.email || USER_EMAIL_FALLBACK;
       const machineID = ident.machineID || getMachineId();
 
-      const modelConfig = getCachedModelConfig(model.id);
+      let modelConfig = getCachedModelConfig(model.id);
       if (!modelConfig?.key) {
-        throw new Error(`Unknown Qoder model id: ${model.id}`);
+        try {
+          const refreshed = await updateQoderModelsCache(accessToken, userID, name, email, options?.signal);
+          if (refreshed) modelConfig = getCachedModelConfig(model.id);
+        } catch {}
+      }
+      if (!modelConfig?.key) {
+        throw new Error(`Unknown Qoder model id: ${model.id}. Run /qoder.refresh or /qoder.model to sync the live catalog.`);
       }
       const qoderModel = modelConfig.key;
       const isReasoning = Boolean(modelConfig.is_reasoning || modelConfig.thinking_config);
 
-      const normalizedMessages = transformMessagesForQoder(context.messages);
+      const preserveImages = model.input?.includes("image") ?? false;
+      const normalizedMessages = transformMessagesForQoder(context.messages, preserveImages);
       const systemText = contentToText(context.systemPrompt || "");
 
       let lastUserText = "";
@@ -187,30 +201,38 @@ export function streamQoder(
       }
 
       const stablePart = stableHash("qoder-session", userID, qoderModel);
-      const firstUser = context.messages.find((m) => m.role === "user");
-      const firstUserFingerprint = firstUser
-        ? `${getContentText(firstUser)}|images=${getContentImages(firstUser).length}`
-        : "";
+      // Same-process reuse: same model+user+first-prompt shares server session for caching;
+      // process restart generates new ids so sessions never collide across restarts.
+      const firstUserMsg = context.messages.find((m) => m.role === "user");
+      const fingerprint = firstUserMsg ? `${getContentText(firstUserMsg)}|images=${getContentImages(firstUserMsg).length}` : "";
       const sessionID = options?.sessionId
         ? `${stablePart}-${options.sessionId}`
-        : `${stablePart}-${stableHash("qoder-conv", firstUserFingerprint)}`;
+        : resolveSessionID(stablePart, fingerprint);
 
       let maxTokens = MAX_OUTPUT_TOKENS;
       if (options?.maxTokens && options.maxTokens < maxTokens) {
         maxTokens = options.maxTokens;
       }
 
-      const toolsRaw = context.tools && context.tools.length > 0 ? transformTools(context.tools) : undefined;
+      const toolsRaw =
+        options?.toolChoice === "none" || !context.tools || context.tools.length === 0
+          ? undefined
+          : transformTools(context.tools);
       const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
 
       const requestedLevel = options?.reasoning;
       const clamped = requestedLevel ? clampThinkingLevel(model, requestedLevel) : undefined;
       const reasoningLevel = clamped === "off" ? undefined : clamped;
       const parameters: Record<string, unknown> = { max_tokens: maxTokens };
+      if (typeof options?.temperature === "number") parameters.temperature = options.temperature;
+      if (model.samplingParams) Object.assign(parameters, model.samplingParams);
+      if (options?.samplingParams) Object.assign(parameters, options.samplingParams);
+      let effort: string | undefined;
       if (reasoningLevel) {
         parameters.enable_thinking = true;
         const mapped = model.thinkingLevelMap?.[reasoningLevel];
-        const effort = mapped && mapped !== "enabled" && mapped !== "disabled" ? mapped : reasoningLevel;
+        effort = mapped && mapped !== "enabled" && mapped !== "disabled" ? mapped : reasoningLevel;
+        output.providerThinkingLevel = effort;
         if (modelConfig.thinking_config?.enabled?.efforts && typeof effort === "string") {
           parameters.reasoning_effort = effort;
         }
@@ -218,6 +240,15 @@ export function streamQoder(
         parameters.enable_thinking = false;
       }
 
+      const imageUrls: string[] = [];
+      for (const m of normalizedMessages) {
+        const c = m.content;
+        if (Array.isArray(c)) {
+          for (const part of c) {
+            if (part.type === "image_url" && part.image_url?.url) imageUrls.push(part.image_url.url);
+          }
+        }
+      }
       let reqBody: Record<string, unknown> = {
         request_id: crypto.randomUUID(),
         request_set_id: recordID,
@@ -233,16 +264,16 @@ export function streamQoder(
         agent_id: "agent_common",
         task_id: "common",
         code_language: "",
-        chat_prompt: "",
-        image_urls: null,
+        chat_prompt: lastUserText,
+        image_urls: imageUrls.length > 0 ? imageUrls : null,
         aliyun_user_type: "",
-        system: "",
+        system: systemText,
         messages: systemText ? [{ role: "system", content: systemText }, ...normalizedMessages] : normalizedMessages,
         tools: toolsRaw || [],
         parameters,
         chat_context: {
-          chatPrompt: "",
-          imageUrls: null,
+          chatPrompt: lastUserText,
+          imageUrls: imageUrls.length > 0 ? imageUrls : null,
           extra: {
             context: [],
             modelConfig: {
@@ -273,6 +304,10 @@ export function streamQoder(
         }
       }
 
+      const modelKeyAfterPayload = (reqBody.model_config as { key?: unknown } | undefined)?.key;
+      const effectiveModelKey = typeof modelKeyAfterPayload === "string" && modelKeyAfterPayload ? modelKeyAfterPayload : qoderModel;
+      const modelSourceAfterPayload = (reqBody.model_config as { source?: unknown } | undefined)?.source;
+      const effectiveSource = typeof modelSourceAfterPayload === "string" && modelSourceAfterPayload ? modelSourceAfterPayload : String(modelConfig.source || "system");
       const encodedBytes = Buffer.from(qoderEncodeBody(Buffer.from(JSON.stringify(reqBody))), "utf8");
       const chatURL = getChatURL();
       const headers = buildAuthHeaders(encodedBytes, chatURL, {
@@ -309,8 +344,8 @@ export function streamQoder(
         response = await doFetch(chatURL, {
           method: "POST",
           headers: requestHeaders(options?.headers, {
-            "X-Model-Key": qoderModel,
-            "X-Model-Source": String(modelConfig.source || "system"),
+            "X-Model-Key": effectiveModelKey,
+            "X-Model-Source": effectiveSource,
             ...headers,
           }),
           body: encodedBytes,
@@ -329,7 +364,32 @@ export function streamQoder(
         model,
       );
 
-      if (!response.ok) {
+      if (!response.ok && [429, 502, 503, 504].includes(response.status)) {
+        const firstErr = await readResponseTextLimited(response).catch(() => "");
+        await new Promise((r) => setTimeout(r, 800));
+        armIdleTimeout();
+        response = await doFetch(chatURL, {
+          method: "POST",
+          headers: requestHeaders(options?.headers, {
+            "X-Model-Key": effectiveModelKey,
+            "X-Model-Source": effectiveSource,
+            ...headers,
+          }),
+          body: encodedBytes,
+          signal: requestSignal,
+        });
+        await options?.onResponse?.(
+          {
+            status: response.status,
+            headers: Object.fromEntries(response.headers.entries()),
+          },
+          model,
+        );
+        if (!response.ok) {
+          const errText = await readResponseTextLimited(response).catch(() => firstErr);
+          throw new Error(`Qoder API request failed: ${response.status} ${response.statusText}. Response: ${errText}`);
+        }
+      } else if (!response.ok) {
         const errText = await readResponseTextLimited(response);
         throw new Error(`Qoder API request failed: ${response.status} ${response.statusText}. Response: ${errText}`);
       }
@@ -343,8 +403,7 @@ export function streamQoder(
       let contentBlockIndex = -1;
       let thinkingBlockIndex = -1;
       const toolCallsState: ToolCallState[] = [];
-      // SimpleStreamOptions.reasoning is ThinkingLevel (no "off"); absence means thinking off.
-      const thinkingEnabled = options?.reasoning !== undefined;
+      const thinkingEnabled = reasoningLevel !== undefined;
       const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
       const finishContentBlock = () => {
         if (contentBlockIndex === -1) return;
@@ -431,11 +490,13 @@ export function streamQoder(
                 prompt_tokens?: number;
                 completion_tokens?: number;
                 total_tokens?: number;
+                reasoning_tokens?: number;
                 prompt_tokens_details?: {
                   cacheable_tokens?: number;
                   cached_tokens?: number;
                   cache_write_tokens?: number;
                 };
+                completion_tokens_details?: { reasoning_tokens?: number };
               };
               choices?: Array<{
                 finish_reason?: string;
@@ -464,6 +525,8 @@ export function streamQoder(
                 output.usage.totalTokens = inner.usage.total_tokens ?? 0;
                 output.usage.cacheRead = cacheReadTokens;
                 output.usage.cacheWrite = cacheWriteTokens;
+                const reasoningTokens = inner.usage.reasoning_tokens ?? inner.usage.completion_tokens_details?.reasoning_tokens;
+                if (typeof reasoningTokens === "number") output.usage.reasoning = reasoningTokens;
               }
             }
 
@@ -657,6 +720,8 @@ export function streamQoder(
     } catch (e: unknown) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = e instanceof Error ? e.message : String(e);
+      lastStreamDiag.at = Date.now();
+      lastStreamDiag.error = output.errorMessage;
       stream.push({ type: "error", reason: output.stopReason, error: output });
       try {
         stream.end();

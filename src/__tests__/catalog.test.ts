@@ -46,11 +46,11 @@ describe("staticModels", () => {
     expect(staticModels.find((m) => m.upstreamKey === "kmodel")?.contextWindow).toBe(256000);
   });
 
-  it("maps friendly ids to static upstream keys without raw-key aliases", () => {
+  it("maps friendly ids to static upstream keys with case-insensitive fallback", () => {
     expect(getCachedModelConfig("Lite")?.key).toBe("lite");
     expect(getCachedModelConfig("Qwen3.8-Max")?.key).toBe("qmodel_38max");
-    expect(getCachedModelConfig("lite")).toBeNull();
-    expect(getCachedModelConfig("qmodel_38max")).toBeNull();
+    expect(getCachedModelConfig("lite")?.key).toBe("lite");
+    expect(getCachedModelConfig("QMODEL_38MAX")?.key).toBe("qmodel_38max");
   });
 });
 

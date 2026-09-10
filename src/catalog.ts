@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
@@ -57,20 +57,12 @@ interface ModelCacheFile {
   configs?: Record<string, QoderModelEntry>;
 }
 
-const PI_THINKING_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+export const PI_THINKING_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
-function effortMap(efforts: readonly string[], canDisable: boolean): ThinkingLevelMap {
-  const supported = new Set(efforts);
+function thinkingMap(efforts: readonly string[] | null, canDisable: boolean): ThinkingLevelMap {
+  const supported = efforts ? new Set(efforts) : null;
   const map: ThinkingLevelMap = { off: canDisable ? "disabled" : null };
-  for (const level of PI_THINKING_LEVELS) {
-    map[level] = supported.has(level) ? level : null;
-  }
-  return map;
-}
-
-function toggleMap(canDisable: boolean): ThinkingLevelMap {
-  const map: ThinkingLevelMap = { off: canDisable ? "disabled" : null };
-  for (const level of PI_THINKING_LEVELS) map[level] = "enabled";
+  for (const level of PI_THINKING_LEVELS) map[level] = !supported ? "enabled" : supported.has(level) ? level : null;
   return map;
 }
 
@@ -101,7 +93,7 @@ export const staticModels: QoderModelDef[] = [
     name: "Ultimate",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["low", "medium", "high", "xhigh", "max"], true),
+    thinkingLevelMap: thinkingMap(["low", "medium", "high", "xhigh", "max"], true),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -111,7 +103,7 @@ export const staticModels: QoderModelDef[] = [
     name: "Performance",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["low", "medium", "high", "xhigh"], true),
+    thinkingLevelMap: thinkingMap(["low", "medium", "high", "xhigh"], true),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -139,7 +131,7 @@ export const staticModels: QoderModelDef[] = [
     name: "Cantus",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["low", "medium", "high", "xhigh", "max"], false),
+    thinkingLevelMap: thinkingMap(["low", "medium", "high", "xhigh", "max"], false),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -149,7 +141,7 @@ export const staticModels: QoderModelDef[] = [
     name: "Qwen3.8-Max",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["low", "medium", "xhigh"], true),
+    thinkingLevelMap: thinkingMap(["low", "medium", "xhigh"], true),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -159,7 +151,7 @@ export const staticModels: QoderModelDef[] = [
     name: "Qwen3.8-Flash",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["low", "medium", "xhigh"], true),
+    thinkingLevelMap: thinkingMap(["low", "medium", "xhigh"], true),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -169,7 +161,7 @@ export const staticModels: QoderModelDef[] = [
     name: "Qwen3.7-Max",
     reasoning: true,
     supportsEffort: false,
-    thinkingLevelMap: toggleMap(true),
+    thinkingLevelMap: thinkingMap(null, true),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -179,7 +171,7 @@ export const staticModels: QoderModelDef[] = [
     name: "Qwen3.7-Plus",
     reasoning: true,
     supportsEffort: false,
-    thinkingLevelMap: toggleMap(true),
+    thinkingLevelMap: thinkingMap(null, true),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -189,7 +181,7 @@ export const staticModels: QoderModelDef[] = [
     name: "Kimi-K3",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["low", "high", "max"], false),
+    thinkingLevelMap: thinkingMap(["low", "high", "max"], false),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -208,7 +200,7 @@ export const staticModels: QoderModelDef[] = [
     name: "GLM-5.3",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["low", "high", "max"], false),
+    thinkingLevelMap: thinkingMap(["low", "high", "max"], false),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -218,7 +210,7 @@ export const staticModels: QoderModelDef[] = [
     name: "GLM-5.3-Flash",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["high", "max"], false),
+    thinkingLevelMap: thinkingMap(["high", "max"], false),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -228,7 +220,7 @@ export const staticModels: QoderModelDef[] = [
     name: "DeepSeek-V4-Pro",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["high", "max"], true),
+    thinkingLevelMap: thinkingMap(["high", "max"], true),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -238,7 +230,7 @@ export const staticModels: QoderModelDef[] = [
     name: "DeepSeek-V4-Flash",
     reasoning: true,
     supportsEffort: true,
-    thinkingLevelMap: effortMap(["low", "high", "max"], true),
+    thinkingLevelMap: thinkingMap(["low", "high", "max"], true),
     input: ["text", "image"],
     contextWindow: DEFAULT_CONTEXT_WINDOW,
   }),
@@ -257,13 +249,21 @@ function getCachePath(): string {
   return join(homedir(), ".pi", "agent", MODEL_CACHE_FILE);
 }
 
+let memCache: { mtimeMs: number; data: ModelCacheFile | null } | null = null;
 function readCacheFile(): ModelCacheFile | null {
   const cachePath = getCachePath();
-  if (!existsSync(cachePath)) return null;
-  try {
-    return JSON.parse(readFileSync(cachePath, "utf8")) as ModelCacheFile;
-  } catch {
+  if (!existsSync(cachePath)) {
+    memCache = null;
     return null;
+  }
+  try {
+    const mtimeMs = statSync(cachePath).mtimeMs;
+    if (memCache && memCache.mtimeMs === mtimeMs) return memCache.data;
+    const data = JSON.parse(readFileSync(cachePath, "utf8")) as ModelCacheFile;
+    memCache = { mtimeMs, data };
+    return data;
+  } catch {
+    return memCache?.data ?? null;
   }
 }
 
@@ -276,9 +276,9 @@ export function buildThinkingLevelMap(entry: QoderModelEntry): ThinkingLevelMap 
   if (!tc) return undefined;
   const efforts = tc.enabled?.efforts;
   if (efforts && typeof efforts === "object") {
-    return effortMap(Object.keys(efforts), Boolean(tc.disabled));
+    return thinkingMap(Object.keys(efforts), Boolean(tc.disabled));
   }
-  if (tc.enabled) return toggleMap(Boolean(tc.disabled));
+  if (tc.enabled) return thinkingMap(null, Boolean(tc.disabled));
   return undefined;
 }
 
@@ -355,7 +355,23 @@ export function getCachedModelConfig(modelId: string): QoderModelEntry | null {
     if (legacyEntry) return withMaxContextAsDefault(legacyEntry);
   }
 
-  const staticModel = staticModels.find((model) => model.id === modelId);
+  const lower = modelId.toLowerCase();
+  if (data?.configs) {
+    const ciKey = Object.keys(data.configs).find((k) => k.toLowerCase() === lower);
+    if (ciKey && data.configs[ciKey]) return withMaxContextAsDefault(data.configs[ciKey]);
+    const byUpstream = Object.values(data.configs).find(
+      (e) => e && typeof e === "object" && typeof (e as QoderModelEntry).key === "string" && ((e as QoderModelEntry).key as string).toLowerCase() === lower,
+    ) as QoderModelEntry | undefined;
+    if (byUpstream) return withMaxContextAsDefault(byUpstream);
+  }
+  if (data && Array.isArray(data.models)) {
+    const ciModel = (data.models as QoderModelDef[]).find((m) => m.id.toLowerCase() === lower);
+    if (ciModel && data.configs) {
+      const cfgKey = Object.keys(data.configs ?? {}).find((k) => toQoderModelId(data.configs?.[k]?.display_name) === ciModel.id);
+      if (cfgKey && data.configs[cfgKey]) return withMaxContextAsDefault(data.configs[cfgKey]);
+    }
+  }
+  const staticModel = staticModels.find((model) => model.id === modelId || model.id.toLowerCase() === lower || (model.upstreamKey || "").toLowerCase() === lower);
   if (staticModel) {
     return {
       key: staticModel.upstreamKey || modelId,
@@ -386,6 +402,12 @@ export function isCacheStale(): boolean {
   if (!data || typeof data.updatedAt !== "number") return true;
   return Date.now() - data.updatedAt > MODEL_CACHE_TTL_MS;
 }
+
+export const lastCatalogRefresh: { at: number | null; latencyMs: number | null; error: string | null } = {
+  at: null,
+  latencyMs: null,
+  error: null,
+};
 
 export interface CatalogCacheInfo {
   count: number;
@@ -426,18 +448,32 @@ export async function updateQoderModelsCache(
   signal?: AbortSignal,
 ): Promise<QoderModelDef[] | undefined> {
   const modelListURL = getModelListURL();
+  const started = Date.now();
   let tempPath: string | undefined;
   try {
     const headers = buildAuthHeaders(null, modelListURL, { userID, authToken, name, email });
-    const response = await fetchWithTimeout(
-      modelListURL,
-      {
-        method: "GET",
-        headers: { Accept: "application/json", ...headers },
-      },
-      { signal, label: "Qoder model catalog request" },
-    );
-    if (!response.ok) return undefined;
+    let response: Response | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      signal?.throwIfAborted();
+      response = await fetchWithTimeout(
+        modelListURL,
+        {
+          method: "GET",
+          headers: { Accept: "application/json", ...headers },
+        },
+        { signal, label: "Qoder model catalog request" },
+      );
+      if (response.ok) break;
+      if (![429, 502, 503, 504].includes(response.status) || attempt === 2) {
+        lastCatalogRefresh.at = Date.now();
+        lastCatalogRefresh.latencyMs = Date.now() - started;
+        lastCatalogRefresh.error = `HTTP ${response.status}`;
+        return undefined;
+      }
+      await response.text().catch(() => "");
+      await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+    }
+    if (!response?.ok) return undefined;
 
     const resData = (await response.json()) as { chat?: QoderModelEntry[] };
     const chatModels = resData.chat || [];
@@ -481,9 +517,16 @@ export async function updateQoderModelsCache(
     });
     renameSync(tempPath, cachePath);
     tempPath = undefined;
+    memCache = null;
+    lastCatalogRefresh.at = Date.now();
+    lastCatalogRefresh.latencyMs = Date.now() - started;
+    lastCatalogRefresh.error = null;
     return newModels;
   } catch (error) {
     if (signal?.aborted) throw error;
+    lastCatalogRefresh.at = Date.now();
+    lastCatalogRefresh.latencyMs = Date.now() - started;
+    lastCatalogRefresh.error = error instanceof Error ? error.message : String(error);
     return undefined;
   } finally {
     if (tempPath) {

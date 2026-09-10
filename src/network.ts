@@ -107,28 +107,7 @@ export async function readResponseTextLimited(
   response: Response,
   maxBytes = MAX_ERROR_BODY_BYTES,
 ): Promise<string> {
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (total < maxBytes) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const remaining = maxBytes - total;
-      const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value;
-      chunks.push(chunk);
-      total += chunk.byteLength;
-      if (value.byteLength > remaining) break;
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  const combined = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    combined.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(combined);
+  // ponytail: full body read then slice, server error bodies are small
+  const text = await response.text().catch(() => "");
+  return text.length > maxBytes ? text.slice(0, maxBytes) : text;
 }

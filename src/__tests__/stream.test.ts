@@ -9,7 +9,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { qoderDecodeBody } from "../protocol/encoding.js";
-import { streamQoder } from "../protocol/stream.js";
+import { __clearSessionFallbackCacheForTests, streamQoder } from "../protocol/stream.js";
 import { loadLiveFixture } from "./live-fixture.js";
 
 vi.mock("../auth/credentials.js", () => ({
@@ -227,7 +227,8 @@ describe("streamQoder", () => {
     expect(doneMessage?.usage.totalTokens).toBe(105);
   });
 
-  it("uses a stable session_id fallback when Pi does not pass sessionId", async () => {
+  it("reuses session_id for same prompt in-process, splits different prompts", async () => {
+    __clearSessionFallbackCacheForTests();
     const bodies: string[] = [];
     globalThis.fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
       bodies.push(Buffer.from(init?.body as Uint8Array).toString("utf8"));
@@ -235,12 +236,16 @@ describe("streamQoder", () => {
     }) as unknown as typeof fetch;
     await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
     await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const other: Context = { systemPrompt: "test", messages: [{ role: "user", content: "different prompt" }], tools: [] } as unknown as Context;
+    await consume(streamQoder(makeModel(), other, { apiKey: "fake" }));
     const ids = bodies.map((encoded) => {
       const parsed = JSON.parse(qoderDecodeBody(encoded).toString("utf8")) as { session_id: string };
       return parsed.session_id;
     });
     expect(ids[0]).toBeTruthy();
     expect(ids[0]).toBe(ids[1]);
+    expect(ids[2]).toBeTruthy();
+    expect(ids[2]).not.toBe(ids[0]);
   });
 
   it("reports a tool_use stop reason when the stream emits tool calls", async () => {

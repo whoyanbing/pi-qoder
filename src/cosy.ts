@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { QODER_CLIENT_TYPE, QODER_GATEWAY_COSY_VERSION } from "./config.js";
@@ -66,7 +66,10 @@ export function getMachineId(): string {
   try {
     const savePath = paths[1];
     mkdirSync(dirname(savePath), { recursive: true });
-    writeFileSync(savePath, newId, "utf8");
+    writeFileSync(savePath, newId, { encoding: "utf-8", mode: 0o600 });
+  } catch {}
+  try {
+    chmodSync(paths[1], 0o600);
   } catch {}
   return newId;
 }
