@@ -15,6 +15,7 @@ import {
   getModelListURL,
 } from "./config.js";
 import { buildAuthHeaders } from "./cosy.js";
+import { abortableDelay } from "./auth/login.js";
 import { fetchWithTimeout } from "./network.js";
 
 export { DEFAULT_CONTEXT_WINDOW, MAX_OUTPUT_TOKENS, ZERO_COST } from "./config.js";
@@ -512,7 +513,7 @@ async function updateQoderModelsCacheUnlocked(
         return undefined;
       }
       await response.text().catch(() => "");
-      await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+      await abortableDelay(500 * 2 ** attempt, signal);
     }
     if (!response?.ok) return undefined;
 

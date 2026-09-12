@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { getCachedCredentials } from "./auth/credentials.js";
 import { isPatRefresh } from "./auth/pat.js";
 import { fetchQoderUsage, type QoderProviderUsage } from "./auth/usage.js";
-import { getCatalogCacheInfo, getCachedModels, lastCatalogRefresh, updateQoderModelsCache, type QoderModelDef } from "./catalog.js";
+import { PI_THINKING_LEVELS as THINKING_LEVELS, getCatalogCacheInfo, getCachedModels, lastCatalogRefresh, updateQoderModelsCache, type QoderModelDef } from "./catalog.js";
 import { lastStreamDiag } from "./protocol/stream.js";
 import {
   PAT_ENV_NAMES,
@@ -47,7 +47,6 @@ function formatUsage(usage: QoderProviderUsage): string {
   return lines.join("\n");
 }
 
-import { PI_THINKING_LEVELS as THINKING_LEVELS } from "./catalog.js";
 
 function formatThinkingLevels(model: QoderModelDef): string {
   const map = model.thinkingLevelMap;
@@ -173,7 +172,7 @@ export function registerQoderCommands(pi: ExtensionAPI): void {
         return;
       }
       try {
-        const models = await updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email);
+        const models = await updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email, ctx.signal);
         notify(ctx, models ? `Qoder catalog refreshed: ${models.length} models.` : "Qoder refresh returned no models; kept existing cache.");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

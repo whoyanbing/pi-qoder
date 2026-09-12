@@ -14,6 +14,7 @@ import {
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
 import { resolveQoderIdentity } from "../auth/credentials.js";
+import { abortableDelay } from "../auth/login.js";
 import { getCachedModelConfig, updateQoderModelsCache } from "../catalog.js";
 import { MAX_OUTPUT_TOKENS, USER_EMAIL_FALLBACK, USER_NAME_FALLBACK, getChatURL } from "../config.js";
 import { buildAuthHeaders, getMachineId } from "../cosy.js";
@@ -374,7 +375,7 @@ export function streamQoder(
         if (![429, 502, 503, 504].includes(response.status) || attempt === 2) {
           throw new Error(`Qoder API request failed: ${response.status} ${response.statusText}. Response: ${lastErrText}`);
         }
-        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+        await abortableDelay(500 * 2 ** attempt, requestSignal);
       }
       if (!response?.ok) {
         throw new Error(`Qoder API request failed: ${response?.status ?? "unknown"} ${response?.statusText ?? ""}. Response: ${lastErrText}`);
@@ -447,7 +448,9 @@ export function streamQoder(
           armIdleTimeout();
           appendBuffer(decoder.decode(value, { stream: true }));
         }
-        if (bufferByteLength() > MAX_SSE_BUFFER_BYTES) {
+        // UTF-8 encodes every UTF-16 code unit as at most 3 bytes, so below
+        // a third of the cap the precise (copy + scan) check provably cannot fire.
+        if (buffer.length - bufferStart > MAX_SSE_BUFFER_BYTES / 3 && bufferByteLength() > MAX_SSE_BUFFER_BYTES) {
           throw new Error(`Qoder SSE frame exceeded ${MAX_SSE_BUFFER_BYTES} bytes`);
         }
 

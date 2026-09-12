@@ -28,14 +28,12 @@ function getMaxTrailingPossibleTagPrefixLength(text: string, tags: string[]): nu
   return maxLength;
 }
 
+/** Matches every open/close marker in THINKING_TAG_VARIANTS in one pass. */
+const THINKING_TAG_PATTERN = /<\/?(?:thinking|think|reasoning|thought)>/g;
+
 /** Strip thinking/reasoning tag markers from a single reasoning_content chunk. */
 export function stripThinkingTags(text: string): string {
-  let out = text;
-  for (const { open, close } of THINKING_TAG_VARIANTS) {
-    if (open.length > 0 && out.includes(open)) out = out.split(open).join("");
-    if (close.length > 0 && out.includes(close)) out = out.split(close).join("");
-  }
-  return out;
+  return text.replace(THINKING_TAG_PATTERN, "");
 }
 
 /**

@@ -22,7 +22,7 @@ function parseExpiresAt(s?: string, expiresInSeconds?: number): number {
   return Date.now() + 30 * 24 * 60 * 60 * 1000;
 }
 
-function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+export function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason || new Error("Login cancelled"));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {

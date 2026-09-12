@@ -1,12 +1,7 @@
 import type {
-  AssistantMessage,
+  Tool,
   ImageContent,
   Message,
-  TextContent,
-  ThinkingContent,
-  Tool,
-  ToolCall,
-  ToolResultMessage,
 } from "@earendil-works/pi-ai";
 
 interface QoderTool {
@@ -40,8 +35,8 @@ export function getContentText(msg: Message): string {
   if (Array.isArray(msg.content)) {
     return msg.content
       .map((c) => {
-        if (c.type === "text") return (c as TextContent).text;
-        if (c.type === "thinking") return (c as ThinkingContent).thinking;
+        if (c.type === "text") return c.text;
+        if (c.type === "thinking") return c.thinking;
         return "";
       })
       .join("");
@@ -99,23 +94,14 @@ export function transformMessagesForQoder(messages: Message[], preserveAllImages
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
-    if (
-      msg.role === "assistant" &&
-      ((msg as AssistantMessage).stopReason === "error" || (msg as AssistantMessage).stopReason === "aborted")
-    ) {
-      const am = msg as AssistantMessage;
-      if (Array.isArray(am.content)) {
-        for (const block of am.content) {
-          if (block.type === "toolCall") {
-            const id = (block as ToolCall).id;
-            if (id) droppedToolCallIds.add(id);
-          }
-        }
+    if (msg.role === "assistant" && (msg.stopReason === "error" || msg.stopReason === "aborted")) {
+      for (const block of msg.content) {
+        if (block.type === "toolCall" && block.id) droppedToolCallIds.add(block.id);
       }
       continue;
     }
 
-    if (msg.role === "toolResult" && droppedToolCallIds.has((msg as ToolResultMessage).toolCallId)) {
+    if (msg.role === "toolResult" && droppedToolCallIds.has(msg.toolCallId)) {
       continue;
     }
 
@@ -132,8 +118,8 @@ export function transformMessagesForQoder(messages: Message[], preserveAllImages
         } else if (images.length > 0) {
           content = msg.content
             .map((c): QoderTextPart | QoderImagePart | null => {
-              if (c.type === "text") return { type: "text", text: (c as TextContent).text };
-              if (c.type === "image") return imageUrl(c as ImageContent);
+              if (c.type === "text") return { type: "text", text: c.text };
+              if (c.type === "image") return imageUrl(c);
               return null;
             })
             .filter((p): p is QoderTextPart | QoderImagePart => p !== null);
@@ -143,30 +129,28 @@ export function transformMessagesForQoder(messages: Message[], preserveAllImages
       }
       normalizedMessages.push({ role: "user", content });
     } else if (msg.role === "assistant") {
-      const am = msg as AssistantMessage;
       let content = "";
       const toolCalls: QoderToolCall[] = [];
-
-      if (Array.isArray(am.content)) {
-        for (const block of am.content) {
-          if (block.type === "text") {
-            content += (block as TextContent).text;
-          } else if (block.type === "thinking") {
-            content += `<thinking>${(block as ThinkingContent).thinking}</thinking>\n\n`;
-          } else if (block.type === "toolCall") {
-            const tc = block as ToolCall;
-            toolCalls.push({
-              id: tc.id,
-              type: "function",
-              function: {
-                name: tc.name,
-                arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments),
-              },
-            });
-          }
+      // Legacy shape: older persisted sessions may carry string content.
+      if (typeof msg.content === "string") {
+        content = msg.content;
+      } else {
+        for (const block of msg.content) {
+        if (block.type === "text") {
+          content += block.text;
+        } else if (block.type === "thinking") {
+          content += `<thinking>${block.thinking}</thinking>\n\n`;
+        } else if (block.type === "toolCall") {
+          toolCalls.push({
+            id: block.id,
+            type: "function",
+            function: {
+              name: block.name,
+              arguments: typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments),
+            },
+          });
         }
-      } else if (typeof am.content === "string") {
-        content = am.content;
+        }
       }
 
       const mapped: QoderMessage = {
@@ -176,13 +160,12 @@ export function transformMessagesForQoder(messages: Message[], preserveAllImages
       if (toolCalls.length > 0) mapped.tool_calls = toolCalls;
       normalizedMessages.push(mapped);
     } else if (msg.role === "toolResult") {
-      const tr = msg as ToolResultMessage;
-      const images = getContentImages(tr);
+      const images = getContentImages(msg);
       const replayImages = images.length > 0 && (preserveAllImages || i > currentUserIndex);
-      const text = getContentText(tr);
+      const text = getContentText(msg);
       normalizedMessages.push({
         role: "tool",
-        tool_call_id: tr.toolCallId,
+        tool_call_id: msg.toolCallId,
         content: !replayImages && images.length > 0 ? `${text}\n\n${toolImageNote(images.length)}`.trim() : text,
       });
 
