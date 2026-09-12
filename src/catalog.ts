@@ -282,6 +282,9 @@ function readCacheFile(): ModelCacheFile | null {
   }
 }
 
+let cachedModelsData: ModelCacheFile | null = null;
+let cachedModelsResult: QoderModelDef[] | null = null;
+
 export function toQoderModelId(displayName?: string): string {
   return (displayName || "QoderModel").replace(/\s+/g, "");
 }
@@ -334,6 +337,7 @@ function withMaxContextAsDefault(entry: QoderModelEntry): QoderModelEntry {
 export function getCachedModels(): QoderModelDef[] {
   const data = readCacheFile();
   if (data && Array.isArray(data.models)) {
+    if (cachedModelsData === data && cachedModelsResult) return cachedModelsResult;
     const models: QoderModelDef[] = data.models.map((model: QoderModelDef) => {
       const config = data.configs?.[model.id];
       const display = config?.display_name;
@@ -349,11 +353,16 @@ export function getCachedModels(): QoderModelDef[] {
       if (model.name) return { ...normalized, id: toQoderModelId(model.name) };
       return normalized;
     });
-    if (data.configs && typeof data.configs === "object" && !data.configs.auto && !data.configs.Auto) {
-      return models.filter((model) => model.id.toLowerCase() !== "auto");
-    }
-    return models;
+    const result =
+      data.configs && typeof data.configs === "object" && !data.configs.auto && !data.configs.Auto
+        ? models.filter((model) => model.id.toLowerCase() !== "auto")
+        : models;
+    cachedModelsData = data;
+    cachedModelsResult = result;
+    return result;
   }
+  cachedModelsData = null;
+  cachedModelsResult = null;
   return staticModels;
 }
 
@@ -543,7 +552,7 @@ async function updateQoderModelsCacheUnlocked(
     const cachePath = getCachePath();
     mkdirSync(dirname(cachePath), { recursive: true });
     tempPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tempPath, JSON.stringify({ updatedAt: Date.now(), models: newModels, configs }, null, 2), {
+    writeFileSync(tempPath, JSON.stringify({ updatedAt: Date.now(), models: newModels, configs }), {
       encoding: "utf-8",
       mode: 0o600,
     });
