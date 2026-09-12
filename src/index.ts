@@ -1,7 +1,7 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
 import { registerApiProvider } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
-import { autoLoginFromEnvironment, getCachedCredentials, loginQoder, refreshQoderToken } from "./auth/credentials.js";
+import { autoLoginFromEnvironment, getCachedCredentials, loginQoder, refreshCatalogIfNeeded, refreshQoderToken } from "./auth/credentials.js";
 import { fetchQoderUsage } from "./auth/usage.js";
 import { registerQoderCommands } from "./commands.js";
 import { getCachedModels, isCacheStale, toProviderModels, updateQoderModelsCache } from "./catalog.js";
@@ -25,10 +25,9 @@ function registerQoderApi(): void {
 }
 
 async function refreshCatalogFromCredentials(signal?: AbortSignal): Promise<void> {
-  if (!isCacheStale()) return;
   const credentials = getCachedCredentials();
   if (!credentials?.access || !credentials.userID) return;
-  await updateQoderModelsCache(credentials.access, credentials.userID, credentials.name, credentials.email, signal);
+  await refreshCatalogIfNeeded(credentials, signal);
 }
 
 export default async function (pi: ExtensionAPI) {

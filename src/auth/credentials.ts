@@ -131,7 +131,7 @@ export async function resolveQoderIdentity(
   return creds;
 }
 
-async function refreshCatalogIfNeeded(creds: QoderCredentials, signal?: AbortSignal, force = false): Promise<void> {
+export async function refreshCatalogIfNeeded(creds: QoderCredentials, signal?: AbortSignal, force = false): Promise<void> {
   if (!force && !isCacheStale()) return;
   await updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email, signal);
 }
