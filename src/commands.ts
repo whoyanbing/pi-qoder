@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { getCachedCredentials } from "./auth/credentials.js";
 import { isPatRefresh } from "./auth/pat.js";
 import { fetchQoderUsage, type QoderProviderUsage } from "./auth/usage.js";
-import { getCatalogCacheInfo, getCachedModels, isCacheStale, lastCatalogRefresh, updateQoderModelsCache, type QoderModelDef } from "./catalog.js";
+import { getCatalogCacheInfo, getCachedModels, lastCatalogRefresh, updateQoderModelsCache, type QoderModelDef } from "./catalog.js";
 import { lastStreamDiag } from "./protocol/stream.js";
 import {
   PAT_ENV_NAMES,
@@ -179,7 +179,6 @@ export function registerQoderCommands(pi: ExtensionAPI): void {
         const message = error instanceof Error ? error.message : String(error);
         notify(ctx, `Qoder refresh failed: ${message}`, "error");
       }
-      if (isCacheStale()) return;
     },
   });
 
