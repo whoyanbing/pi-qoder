@@ -131,15 +131,15 @@ export async function resolveQoderIdentity(
   return creds;
 }
 
-function scheduleCatalogRefresh(creds: QoderCredentials, signal?: AbortSignal): void {
-  updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email, signal).catch((e) => {
-    console.warn(`[pi-qoder] background catalog refresh failed: ${e instanceof Error ? e.message : String(e)}`);
-  });
-}
-
 async function refreshCatalogIfNeeded(creds: QoderCredentials, signal?: AbortSignal, force = false): Promise<void> {
   if (!force && !isCacheStale()) return;
   await updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email, signal);
+}
+
+function scheduleCatalogRefresh(creds: QoderCredentials, signal?: AbortSignal): void {
+  refreshCatalogIfNeeded(creds, signal).catch((e) => {
+    console.warn(`[pi-qoder] background catalog refresh failed: ${e instanceof Error ? e.message : String(e)}`);
+  });
 }
 
 export async function autoLoginFromEnvironment(signal?: AbortSignal): Promise<void> {
