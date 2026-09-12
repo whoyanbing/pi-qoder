@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { readStoredCredential } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
-import { updateQoderModelsCache } from "../catalog.js";
+import { isCacheStale, updateQoderModelsCache } from "../catalog.js";
 import {
   PROVIDER_ID,
   USER_AGENT,
@@ -137,13 +137,17 @@ function scheduleCatalogRefresh(creds: QoderCredentials, signal?: AbortSignal): 
   });
 }
 
+async function refreshCatalogIfNeeded(creds: QoderCredentials, signal?: AbortSignal, force = false): Promise<void> {
+  if (!force && !isCacheStale()) return;
+  await updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email, signal);
+}
+
 export async function autoLoginFromEnvironment(signal?: AbortSignal): Promise<void> {
   const pat = getPatFromEnvironment();
   if (!pat) return;
   const credentials = await credentialsFromPat(pat, signal);
   saveCredentialsToAuthFile(credentials);
-  const qCreds = credentials as QoderCredentials;
-  await updateQoderModelsCache(qCreds.access, qCreds.userID, qCreds.name, qCreds.email, signal);
+  await refreshCatalogIfNeeded(credentials as QoderCredentials, signal);
 }
 
 export async function loginQoder(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
@@ -152,8 +156,7 @@ export async function loginQoder(callbacks: OAuthLoginCallbacks): Promise<OAuthC
     try {
       const creds = await credentialsFromPat(pat, callbacks.signal);
       try {
-        const q = creds as QoderCredentials;
-        await updateQoderModelsCache(q.access, q.userID, q.name, q.email, callbacks.signal);
+        await refreshCatalogIfNeeded(creds as QoderCredentials, callbacks.signal, true);
       } catch (e) {
         console.warn(`[pi-qoder] catalog refresh after login failed: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -167,8 +170,7 @@ export async function loginQoder(callbacks: OAuthLoginCallbacks): Promise<OAuthC
 
   const creds = await interactiveLogin(callbacks);
   try {
-    const q = creds as QoderCredentials;
-    await updateQoderModelsCache(q.access, q.userID, q.name, q.email, callbacks.signal);
+    await refreshCatalogIfNeeded(creds as QoderCredentials, callbacks.signal, true);
   } catch (e) {
     console.warn(`[pi-qoder] catalog refresh after login failed: ${e instanceof Error ? e.message : String(e)}`);
   }
