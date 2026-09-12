@@ -180,4 +180,34 @@ describe("Qoder model cache", () => {
     const cache = JSON.parse(readFileSync(CACHE_PATH, "utf8"));
     expect(cache.models[0].contextWindow).toBe(200000);
   });
+
+  it("coalesces concurrent catalog refreshes into one fetch", async () => {
+    let resolveFetch: ((value: Response) => void) | undefined;
+    const fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com");
+    const second = updateQoderModelsCache("access-token", "user-id", "Test User", "test@example.com");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch?.(
+      {
+        ok: true,
+        json: async () => ({
+          chat: [{ key: "lite", enable: true, display_name: "Lite" }],
+        }),
+        text: async () => "",
+      } as Response,
+    );
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(a?.map((model) => model.id)).toEqual(["Lite"]);
+    expect(b?.map((model) => model.id)).toEqual(["Lite"]);
+  });
 });

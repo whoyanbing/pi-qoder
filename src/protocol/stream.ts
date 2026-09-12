@@ -18,7 +18,7 @@ import { getCachedModelConfig, updateQoderModelsCache } from "../catalog.js";
 import { MAX_OUTPUT_TOKENS, USER_EMAIL_FALLBACK, USER_NAME_FALLBACK, getChatURL } from "../config.js";
 import { buildAuthHeaders, getMachineId } from "../cosy.js";
 import { readResponseTextLimited } from "../network.js";
-import { qoderEncodeBody } from "./encoding.js";
+import { qoderEncodeBodyBuffer } from "./encoding.js";
 import { stripThinkingTags, ThinkingTagParser } from "./thinking.js";
 import { contentToText, getContentImages, getContentText, transformMessagesForQoder, transformTools } from "./transform.js";
 
@@ -308,9 +308,9 @@ export function streamQoder(
       const effectiveModelKey = typeof modelKeyAfterPayload === "string" && modelKeyAfterPayload ? modelKeyAfterPayload : qoderModel;
       const modelSourceAfterPayload = (reqBody.model_config as { source?: unknown } | undefined)?.source;
       const effectiveSource = typeof modelSourceAfterPayload === "string" && modelSourceAfterPayload ? modelSourceAfterPayload : String(modelConfig.source || "system");
-      const encodedBytes = Buffer.from(qoderEncodeBody(Buffer.from(JSON.stringify(reqBody))), "utf8");
+      const encodedBody = qoderEncodeBodyBuffer(JSON.stringify(reqBody));
       const chatURL = getChatURL();
-      const headers = buildAuthHeaders(encodedBytes, chatURL, {
+      const headers = buildAuthHeaders(encodedBody, chatURL, {
         userID,
         authToken: accessToken,
         name,
@@ -338,60 +338,46 @@ export function streamQoder(
       };
 
       const doFetch = options?.fetch ?? globalThis.fetch;
-      armIdleTimeout();
-      let response: Response;
-      try {
-        response = await doFetch(chatURL, {
-          method: "POST",
-          headers: requestHeaders(options?.headers, {
-            "X-Model-Key": effectiveModelKey,
-            "X-Model-Source": effectiveSource,
-            ...headers,
-          }),
-          body: encodedBytes,
-          signal: requestSignal,
-        });
-      } catch (error) {
-        if (idleController?.signal.aborted && !options?.signal?.aborted) throw idleController.signal.reason || error;
-        throw error;
-      }
-
-      await options?.onResponse?.(
-        {
-          status: response.status,
-          headers: Object.fromEntries(response.headers.entries()),
-        },
-        model,
-      );
-
-      if (!response.ok && [429, 502, 503, 504].includes(response.status)) {
-        const firstErr = await readResponseTextLimited(response).catch(() => "");
-        await new Promise((r) => setTimeout(r, 800));
-        armIdleTimeout();
-        response = await doFetch(chatURL, {
-          method: "POST",
-          headers: requestHeaders(options?.headers, {
-            "X-Model-Key": effectiveModelKey,
-            "X-Model-Source": effectiveSource,
-            ...headers,
-          }),
-          body: encodedBytes,
-          signal: requestSignal,
-        });
+      const chatHeaders = requestHeaders(options?.headers, {
+        "X-Model-Key": effectiveModelKey,
+        "X-Model-Source": effectiveSource,
+        ...headers,
+      });
+      const publishResponse = async (res: Response) => {
         await options?.onResponse?.(
           {
-            status: response.status,
-            headers: Object.fromEntries(response.headers.entries()),
+            status: res.status,
+            headers: Object.fromEntries(res.headers.entries()),
           },
           model,
         );
-        if (!response.ok) {
-          const errText = await readResponseTextLimited(response).catch(() => firstErr);
-          throw new Error(`Qoder API request failed: ${response.status} ${response.statusText}. Response: ${errText}`);
+      };
+
+      let response: Response | undefined;
+      let lastErrText = "";
+      for (let attempt = 0; attempt < 3; attempt++) {
+        armIdleTimeout();
+        try {
+          response = await doFetch(chatURL, {
+            method: "POST",
+            headers: chatHeaders,
+            body: encodedBody as unknown as BodyInit,
+            signal: requestSignal,
+          });
+        } catch (error) {
+          if (idleController?.signal.aborted && !options?.signal?.aborted) throw idleController.signal.reason || error;
+          throw error;
         }
-      } else if (!response.ok) {
-        const errText = await readResponseTextLimited(response);
-        throw new Error(`Qoder API request failed: ${response.status} ${response.statusText}. Response: ${errText}`);
+        await publishResponse(response);
+        if (response.ok) break;
+        lastErrText = await readResponseTextLimited(response).catch(() => lastErrText);
+        if (![429, 502, 503, 504].includes(response.status) || attempt === 2) {
+          throw new Error(`Qoder API request failed: ${response.status} ${response.statusText}. Response: ${lastErrText}`);
+        }
+        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+      }
+      if (!response?.ok) {
+        throw new Error(`Qoder API request failed: ${response?.status ?? "unknown"} ${response?.statusText ?? ""}. Response: ${lastErrText}`);
       }
 
       const reader = response.body?.getReader();
@@ -399,6 +385,18 @@ export function streamQoder(
       activeReader = reader;
       const decoder = new TextDecoder();
       let buffer = "";
+      let bufferStart = 0;
+      const compactBuffer = () => {
+        if (bufferStart === 0) return;
+        buffer = buffer.slice(bufferStart);
+        bufferStart = 0;
+      };
+      const appendBuffer = (chunk: string) => {
+        if (!chunk) return;
+        if (bufferStart > 0 && bufferStart > buffer.length / 2) compactBuffer();
+        buffer += chunk;
+      };
+      const bufferByteLength = () => Buffer.byteLength(bufferStart === 0 ? buffer : buffer.slice(bufferStart), "utf8");
 
       let contentBlockIndex = -1;
       let thinkingBlockIndex = -1;
@@ -443,25 +441,25 @@ export function streamQoder(
         }
         const { done, value } = readResult;
         if (done) {
-          buffer += decoder.decode();
-          if (buffer && !buffer.endsWith("\n")) buffer += "\n";
+          appendBuffer(decoder.decode());
+          if (bufferStart < buffer.length && !buffer.endsWith("\n")) appendBuffer("\n");
         } else {
           armIdleTimeout();
-          buffer += decoder.decode(value, { stream: true });
+          appendBuffer(decoder.decode(value, { stream: true }));
         }
-        if (Buffer.byteLength(buffer, "utf8") > MAX_SSE_BUFFER_BYTES) {
+        if (bufferByteLength() > MAX_SSE_BUFFER_BYTES) {
           throw new Error(`Qoder SSE frame exceeded ${MAX_SSE_BUFFER_BYTES} bytes`);
         }
 
         while (true) {
-          const lineEnd = buffer.indexOf("\n");
+          const lineEnd = buffer.indexOf("\n", bufferStart);
           if (lineEnd === -1) break;
 
-          const line = buffer.substring(0, lineEnd).trim();
-          buffer = buffer.substring(lineEnd + 1);
+          const line = buffer.slice(bufferStart, lineEnd).trim();
+          bufferStart = lineEnd + 1;
           if (!line.startsWith("data:")) continue;
 
-          const dataStr = line.substring(5).trim();
+          const dataStr = line.slice(5).trim();
           if (dataStr === "[DONE]") {
             sawDone = true;
             break;

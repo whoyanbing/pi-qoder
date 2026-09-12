@@ -27,9 +27,13 @@ function remapRearranged(src: Buffer, map: Buffer): Buffer {
 }
 
 export function qoderEncodeBody(plaintext: string | Buffer): string {
+  return qoderEncodeBodyBuffer(plaintext).toString("latin1");
+}
+
+export function qoderEncodeBodyBuffer(plaintext: string | Buffer): Buffer {
   const std = Buffer.isBuffer(plaintext) ? plaintext.toString("base64") : Buffer.from(plaintext).toString("base64");
-  if (std.length === 0) return "";
-  return remapRearranged(Buffer.from(std, "latin1"), ENCODE_MAP).toString("latin1");
+  if (std.length === 0) return Buffer.alloc(0);
+  return remapRearranged(Buffer.from(std, "latin1"), ENCODE_MAP);
 }
 
 export function qoderDecodeBody(encoded: string): Buffer {

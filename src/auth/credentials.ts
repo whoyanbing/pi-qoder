@@ -26,7 +26,18 @@ export interface QoderCredentials extends OAuthCredentials {
 }
 
 const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
+const IDENTITY_CACHE_MAX = 64;
 const identityCache = new Map<string, QoderCredentials>();
+
+function setIdentityCache(key: string, creds: QoderCredentials): void {
+  if (identityCache.has(key)) identityCache.delete(key);
+  identityCache.set(key, creds);
+  while (identityCache.size > IDENTITY_CACHE_MAX) {
+    const oldest = identityCache.keys().next();
+    if (oldest.done) break;
+    identityCache.delete(oldest.value);
+  }
+}
 
 function acquireAuthLock(): () => void {
   for (let attempt = 1; attempt <= 10; attempt++) {
@@ -116,7 +127,7 @@ export async function resolveQoderIdentity(
     refresh: cached?.access === accessToken ? cached.refresh || "" : "",
     expires: cached?.access === accessToken ? cached.expires || 0 : 0,
   };
-  identityCache.set(cacheKey, creds);
+  setIdentityCache(cacheKey, creds);
   return creds;
 }
 

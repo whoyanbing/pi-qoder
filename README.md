@@ -49,7 +49,7 @@ After login, `/model` lists the live catalog. Context uses the largest advertise
 
 ## Commands
 
-The extension registers three slash commands:
+The extension registers four slash commands:
 
 ```text
 /qoder.usage
@@ -64,11 +64,16 @@ Shows plan quota and usage: personal quota and team balance (used / cap / remain
 Lists the models the provider would register, with context windows, thinking levels, and image support. Optional case-insensitive substring `filter` narrows the list (e.g. `/qoder.model qwen`).
 
 ```text
+/qoder.refresh
+```
+
+Force refresh the live model catalog. Requires login.
+
+```text
 /qoder.doctor
 ```
 
 Provider diagnostics: base URL, credential state (identity, token source: `oauth` or `pat`), PAT env var detection, and model catalog cache age/staleness, plus hints for common fixes.
-
 ## Endpoints
 
 | | Global `qoder` |

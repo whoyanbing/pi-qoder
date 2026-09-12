@@ -245,6 +245,21 @@ export const staticModels: QoderModelDef[] = [
   }),
 ];
 
+const staticByUpstream = new Map<string, QoderModelDef>();
+const staticById = new Map<string, QoderModelDef>();
+for (const model of staticModels) {
+  staticById.set(model.id, model);
+  staticById.set(model.id.toLowerCase(), model);
+  if (model.upstreamKey) {
+    staticByUpstream.set(model.upstreamKey, model);
+    staticByUpstream.set(model.upstreamKey.toLowerCase(), model);
+  }
+}
+
+function findStaticModel(modelId: string): QoderModelDef | undefined {
+  return staticById.get(modelId) || staticById.get(modelId.toLowerCase()) || staticByUpstream.get(modelId.toLowerCase());
+}
+
 function getCachePath(): string {
   return join(homedir(), ".pi", "agent", MODEL_CACHE_FILE);
 }
@@ -322,7 +337,7 @@ export function getCachedModels(): QoderModelDef[] {
     const models: QoderModelDef[] = data.models.map((model: QoderModelDef) => {
       const config = data.configs?.[model.id];
       const display = config?.display_name;
-      const staticModel = staticModels.find((seedModel) => seedModel.upstreamKey === model.id);
+      const staticModel = model.id ? staticByUpstream.get(model.id) || staticByUpstream.get(model.id.toLowerCase()) : undefined;
       const normalized: QoderModelDef = {
         ...model,
         api: QODER_API,
@@ -344,57 +359,54 @@ export function getCachedModels(): QoderModelDef[] {
 
 export function getCachedModelConfig(modelId: string): QoderModelEntry | null {
   const data = readCacheFile();
-  if (data?.configs) {
-    const direct = data.configs[modelId];
-    if (direct && toQoderModelId(direct.display_name) === modelId) {
-      return withMaxContextAsDefault(direct);
+  const lower = modelId.toLowerCase();
+  const configs = data?.configs;
+
+  if (configs) {
+    const direct = configs[modelId];
+    if (direct) return withMaxContextAsDefault(direct);
+
+    for (const [key, entry] of Object.entries(configs)) {
+      if (!entry || typeof entry !== "object") continue;
+      if (key.toLowerCase() === lower) return withMaxContextAsDefault(entry);
+      if (toQoderModelId(entry.display_name) === modelId) return withMaxContextAsDefault(entry);
+      if (typeof entry.key === "string" && entry.key.toLowerCase() === lower) return withMaxContextAsDefault(entry);
     }
-    const legacyEntry = Object.values(data.configs).find(
-      (entry) => entry && typeof entry === "object" && toQoderModelId(entry.display_name) === modelId,
-    );
-    if (legacyEntry) return withMaxContextAsDefault(legacyEntry);
   }
 
-  const lower = modelId.toLowerCase();
-  if (data?.configs) {
-    const ciKey = Object.keys(data.configs).find((k) => k.toLowerCase() === lower);
-    if (ciKey && data.configs[ciKey]) return withMaxContextAsDefault(data.configs[ciKey]);
-    const byUpstream = Object.values(data.configs).find(
-      (e) => e && typeof e === "object" && typeof (e as QoderModelEntry).key === "string" && ((e as QoderModelEntry).key as string).toLowerCase() === lower,
-    ) as QoderModelEntry | undefined;
-    if (byUpstream) return withMaxContextAsDefault(byUpstream);
-  }
-  if (data && Array.isArray(data.models)) {
-    const ciModel = (data.models as QoderModelDef[]).find((m) => m.id.toLowerCase() === lower);
-    if (ciModel && data.configs) {
-      const cfgKey = Object.keys(data.configs ?? {}).find((k) => toQoderModelId(data.configs?.[k]?.display_name) === ciModel.id);
-      if (cfgKey && data.configs[cfgKey]) return withMaxContextAsDefault(data.configs[cfgKey]);
+  if (data && Array.isArray(data.models) && configs) {
+    const ciModel = data.models.find((m) => m.id.toLowerCase() === lower);
+    if (ciModel) {
+      const cfg =
+        configs[ciModel.id] ||
+        Object.values(configs).find((entry) => entry && toQoderModelId(entry.display_name) === ciModel.id);
+      if (cfg) return withMaxContextAsDefault(cfg);
     }
   }
-  const staticModel = staticModels.find((model) => model.id === modelId || model.id.toLowerCase() === lower || (model.upstreamKey || "").toLowerCase() === lower);
-  if (staticModel) {
-    return {
-      key: staticModel.upstreamKey || modelId,
-      is_reasoning: staticModel.reasoning,
-      source: "system",
-      thinking_config: staticModel.thinkingLevelMap
-        ? {
-            disabled: staticModel.thinkingLevelMap.off === "disabled" ? {} : undefined,
-            enabled: staticModel.supportsEffort
-              ? {
-                  efforts: Object.fromEntries(
-                    PI_THINKING_LEVELS.filter((level) => staticModel.thinkingLevelMap?.[level] === level).map((level) => [
-                      level,
-                      {},
-                    ]),
-                  ),
-                }
-              : {},
-          }
-        : undefined,
-    };
-  }
-  return null;
+
+  const staticModel = findStaticModel(modelId);
+  if (!staticModel) return null;
+
+  return {
+    key: staticModel.upstreamKey || modelId,
+    is_reasoning: staticModel.reasoning,
+    source: "system",
+    thinking_config: staticModel.thinkingLevelMap
+      ? {
+          disabled: staticModel.thinkingLevelMap.off === "disabled" ? {} : undefined,
+          enabled: staticModel.supportsEffort
+            ? {
+                efforts: Object.fromEntries(
+                  PI_THINKING_LEVELS.filter((level) => staticModel.thinkingLevelMap?.[level] === level).map((level) => [
+                    level,
+                    {},
+                  ]),
+                ),
+              }
+            : {},
+        }
+      : undefined,
+  };
 }
 
 export function isCacheStale(): boolean {
@@ -408,6 +420,8 @@ export const lastCatalogRefresh: { at: number | null; latencyMs: number | null; 
   latencyMs: null,
   error: null,
 };
+
+const catalogRefreshInflight = new Map<string, Promise<QoderModelDef[] | undefined>>();
 
 export interface CatalogCacheInfo {
   count: number;
@@ -441,6 +455,24 @@ export function toProviderModels(models: QoderModelDef[] = getCachedModels()): P
 }
 
 export async function updateQoderModelsCache(
+  authToken: string,
+  userID: string,
+  name: string,
+  email: string,
+  signal?: AbortSignal,
+): Promise<QoderModelDef[] | undefined> {
+  const key = `${userID}:${authToken}`;
+  const existing = catalogRefreshInflight.get(key);
+  if (existing) return existing;
+
+  const promise = updateQoderModelsCacheUnlocked(authToken, userID, name, email, signal).finally(() => {
+    if (catalogRefreshInflight.get(key) === promise) catalogRefreshInflight.delete(key);
+  });
+  catalogRefreshInflight.set(key, promise);
+  return promise;
+}
+
+async function updateQoderModelsCacheUnlocked(
   authToken: string,
   userID: string,
   name: string,
