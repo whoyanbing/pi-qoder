@@ -16,7 +16,7 @@ import {
 import { getMachineId } from "../cosy.js";
 import { fetchWithTimeout, readResponseTextLimited } from "../network.js";
 import { interactiveLogin } from "./login.js";
-import { credentialsFromPat, decodePatRefresh, fetchUserInfo, isPatRefresh } from "./pat.js";
+import { credentialsFromPat, decodePatRefresh, fetchUserInfo, isPatRefresh, parseExpiry } from "./pat.js";
 
 export interface QoderCredentials extends OAuthCredentials {
   userID: string;
@@ -26,17 +26,10 @@ export interface QoderCredentials extends OAuthCredentials {
 }
 
 const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
-const IDENTITY_CACHE_MAX = 64;
-const identityCache = new Map<string, QoderCredentials>();
+let identityCache: { key: string; creds: QoderCredentials } | null = null;
 
 function setIdentityCache(key: string, creds: QoderCredentials): void {
-  if (identityCache.has(key)) identityCache.delete(key);
-  identityCache.set(key, creds);
-  while (identityCache.size > IDENTITY_CACHE_MAX) {
-    const oldest = identityCache.keys().next();
-    if (oldest.done) break;
-    identityCache.delete(oldest.value);
-  }
+  identityCache = { key, creds };
 }
 
 function acquireAuthLock(): () => void {
@@ -114,8 +107,7 @@ export async function resolveQoderIdentity(
   if (cached?.userID && cached.access === accessToken) return cached;
 
   const cacheKey = `${providerID}:${accessToken}`;
-  const mem = identityCache.get(cacheKey);
-  if (mem?.userID) return mem;
+  if (identityCache?.key === cacheKey && identityCache.creds.userID) return identityCache.creds;
 
   const info = await fetchUserInfo(accessToken, signal);
   const creds: QoderCredentials = {
@@ -152,15 +144,10 @@ export async function autoLoginFromEnvironment(signal?: AbortSignal): Promise<vo
 
 export async function loginQoder(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
   const pat = getPatFromEnvironment();
+  let creds: OAuthCredentials | undefined;
   if (pat) {
     try {
-      const creds = await credentialsFromPat(pat, callbacks.signal);
-      try {
-        await refreshCatalogIfNeeded(creds as QoderCredentials, callbacks.signal, true);
-      } catch (e) {
-        console.warn(`[pi-qoder] catalog refresh after login failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-      return creds;
+      creds = await credentialsFromPat(pat, callbacks.signal);
     } catch (error) {
       if (callbacks.signal?.aborted) throw error;
       // Fall through to the interactive flow so a stale environment PAT does
@@ -168,7 +155,7 @@ export async function loginQoder(callbacks: OAuthLoginCallbacks): Promise<OAuthC
     }
   }
 
-  const creds = await interactiveLogin(callbacks);
+  creds ??= await interactiveLogin(callbacks);
   try {
     await refreshCatalogIfNeeded(creds as QoderCredentials, callbacks.signal, true);
   } catch (e) {
@@ -239,14 +226,8 @@ export async function refreshQoderToken(
   };
   if (!data.token) throw new Error("Qoder OAuth refresh returned no access token. Run /login qoder again.");
 
-  let expireMs = Date.now() + 30 * 24 * 60 * 60 * 1000;
-  if (data.expires_at) {
-    const parsed = Date.parse(data.expires_at);
-    if (!Number.isNaN(parsed)) expireMs = parsed;
-  } else if (Number.isFinite(data.expires_in) && data.expires_in! > 0) {
-    // OAuth refresh uses the conventional seconds unit.
-    expireMs = Date.now() + data.expires_in! * 1000;
-  }
+  // OAuth refresh uses the conventional seconds unit.
+  const expireMs = parseExpiry(data.expires_at, data.expires_in, false, 30 * 24 * 60 * 60 * 1000);
 
   const refreshed: QoderCredentials = {
     ...credentials,

@@ -101,12 +101,6 @@ function mapFinishReason(reason: string): StopReason {
   return "stop";
 }
 
-function doneReason(reason: StopReason): Extract<StopReason, "stop" | "length" | "toolUse"> {
-  if (reason === "length") return "length";
-  if (reason === "toolUse") return "toolUse";
-  return "stop";
-}
-
 const PROTECTED_HEADERS = new Set([
   "authorization",
   "cosy-key",
@@ -714,7 +708,7 @@ export function streamQoder(
 
       stream.push({
         type: "done",
-        reason: doneReason(output.stopReason),
+        reason: output.stopReason === "length" || output.stopReason === "toolUse" ? output.stopReason : "stop",
         message: output,
       });
       stream.end();

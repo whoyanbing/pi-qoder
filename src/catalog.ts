@@ -246,19 +246,14 @@ export const staticModels: QoderModelDef[] = [
   }),
 ];
 
-const staticByUpstream = new Map<string, QoderModelDef>();
-const staticById = new Map<string, QoderModelDef>();
+const staticByKey = new Map<string, QoderModelDef>();
 for (const model of staticModels) {
-  staticById.set(model.id, model);
-  staticById.set(model.id.toLowerCase(), model);
-  if (model.upstreamKey) {
-    staticByUpstream.set(model.upstreamKey, model);
-    staticByUpstream.set(model.upstreamKey.toLowerCase(), model);
-  }
+  staticByKey.set(model.id.toLowerCase(), model);
+  if (model.upstreamKey) staticByKey.set(model.upstreamKey.toLowerCase(), model);
 }
 
 function findStaticModel(modelId: string): QoderModelDef | undefined {
-  return staticById.get(modelId) || staticById.get(modelId.toLowerCase()) || staticByUpstream.get(modelId.toLowerCase());
+  return staticByKey.get(modelId.toLowerCase());
 }
 
 function getCachePath(): string {
@@ -282,9 +277,6 @@ function readCacheFile(): ModelCacheFile | null {
     return memCache?.data ?? null;
   }
 }
-
-let cachedModelsData: ModelCacheFile | null = null;
-let cachedModelsResult: QoderModelDef[] | null = null;
 
 export function toQoderModelId(displayName?: string): string {
   return (displayName || "QoderModel").replace(/\s+/g, "");
@@ -338,11 +330,10 @@ function withMaxContextAsDefault(entry: QoderModelEntry): QoderModelEntry {
 export function getCachedModels(): QoderModelDef[] {
   const data = readCacheFile();
   if (data && Array.isArray(data.models)) {
-    if (cachedModelsData === data && cachedModelsResult) return cachedModelsResult;
     const models: QoderModelDef[] = data.models.map((model: QoderModelDef) => {
       const config = data.configs?.[model.id];
       const display = config?.display_name;
-      const staticModel = model.id ? staticByUpstream.get(model.id) || staticByUpstream.get(model.id.toLowerCase()) : undefined;
+      const staticModel = model.id ? findStaticModel(model.id) : undefined;
       const normalized: QoderModelDef = {
         ...model,
         api: QODER_API,
@@ -358,12 +349,8 @@ export function getCachedModels(): QoderModelDef[] {
       data.configs && typeof data.configs === "object" && !data.configs.auto && !data.configs.Auto
         ? models.filter((model) => model.id.toLowerCase() !== "auto")
         : models;
-    cachedModelsData = data;
-    cachedModelsResult = result;
     return result;
   }
-  cachedModelsData = null;
-  cachedModelsResult = null;
   return staticModels;
 }
 

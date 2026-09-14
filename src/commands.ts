@@ -10,7 +10,6 @@ import {
   PROVIDER_NAME,
   QODER_BASE_URL,
   QODER_MANAGE_URL,
-  getPatFromEnvironment,
 } from "./config.js";
 
 type NotifyType = "info" | "warning" | "error";
@@ -97,7 +96,6 @@ function formatModelList(models: readonly QoderModelDef[], filter: string): stri
 function formatDoctor(): string {
   const creds = getCachedCredentials();
   const patEnvName = PAT_ENV_NAMES.find((name) => process.env[name]) ?? "";
-  const patEnv = getPatFromEnvironment();
   const cache = getCatalogCacheInfo();
 
   const lines: string[] = [
@@ -110,7 +108,7 @@ function formatDoctor(): string {
     lines.push(`userID=${creds.userID}`);
     lines.push(`tokenSource=${creds.refresh && isPatRefresh(creds.refresh) ? "pat" : "oauth"}`);
   }
-  lines.push(`patEnv=${patEnv ? `${patEnvName} set` : "unset"}`);
+  lines.push(`patEnv=${patEnvName ? `${patEnvName} set` : "unset"}`);
   lines.push(
     `catalogCache=${cache.count} models, ${cache.updatedAt === null ? "no cache file (static fallback)" : `age ${cache.ageSeconds}s`}, stale=${cache.stale ? "yes" : "no"}`,
   );
@@ -126,7 +124,7 @@ function formatDoctor(): string {
     );
   }
   lines.push("commands=/qoder.usage /qoder.model /qoder.refresh /qoder.doctor");
-  if (!creds && !patEnv) {
+  if (!creds && !patEnvName) {
     lines.push("hint=Run /login qoder to authenticate");
   }
   if (creds && cache.stale) {

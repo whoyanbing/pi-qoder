@@ -24,12 +24,6 @@ function registerQoderApi(): void {
   );
 }
 
-async function refreshCatalogFromCredentials(signal?: AbortSignal): Promise<void> {
-  const credentials = getCachedCredentials();
-  if (!credentials?.access || !credentials.userID) return;
-  await refreshCatalogIfNeeded(credentials, signal);
-}
-
 export default async function (pi: ExtensionAPI) {
   registerQoderApi();
 
@@ -87,7 +81,10 @@ export default async function (pi: ExtensionAPI) {
     try {
       const startupSignal = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
       await autoLoginFromEnvironment(startupSignal);
-      await refreshCatalogFromCredentials(startupSignal);
+      const credentials = getCachedCredentials();
+      if (credentials?.access && credentials.userID) {
+        await refreshCatalogIfNeeded(credentials, startupSignal);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[pi-qoder] background login/catalog refresh failed: ${message}`);

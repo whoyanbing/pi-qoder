@@ -42,6 +42,23 @@ export function decodePatRefresh(refresh: string): {
   };
 }
 
+/** expires_at (ISO or epoch string) wins, else expires_in, else now + fallback. */
+export function parseExpiry(
+  expiresAt: string | undefined,
+  expiresIn: number | undefined,
+  expiresInMs: boolean,
+  fallbackMs: number,
+): number {
+  if (expiresAt) {
+    const parsed = Date.parse(expiresAt);
+    if (!Number.isNaN(parsed)) return parsed;
+    const ms = Number.parseInt(expiresAt, 10);
+    if (!Number.isNaN(ms) && ms > 0) return ms;
+  }
+  if (expiresIn && expiresIn > 0) return Date.now() + (expiresInMs ? expiresIn : expiresIn * 1000);
+  return Date.now() + fallbackMs;
+}
+
 export async function exchangeJobToken(pat: string, signal?: AbortSignal): Promise<PatExchangeResult> {
   const res = await fetchWithTimeout(
     getExchangeURL(),
@@ -72,14 +89,8 @@ export async function exchangeJobToken(pat: string, signal?: AbortSignal): Promi
   };
   if (!data.token) throw new Error("Qoder PAT exchange returned no job token");
 
-  let expiresAt = Date.now() + 24 * 60 * 60 * 1000;
-  if (data.expires_at) {
-    const parsed = Date.parse(data.expires_at);
-    if (!Number.isNaN(parsed)) expiresAt = parsed;
-  } else if (Number.isFinite(data.expires_in) && data.expires_in! > 0) {
-    // Qoder's PAT exchange endpoint reports expires_in in milliseconds.
-    expiresAt = Date.now() + data.expires_in!;
-  }
+  // Qoder's PAT exchange endpoint reports expires_in in milliseconds.
+  const expiresAt = parseExpiry(data.expires_at, data.expires_in, true, 24 * 60 * 60 * 1000);
 
   return {
     jobToken: data.token,

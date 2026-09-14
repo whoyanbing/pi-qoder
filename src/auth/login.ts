@@ -3,23 +3,12 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-a
 import { getDeviceLoginURL, getDevicePollURL, getUserInfoURL, USER_AGENT } from "../config.js";
 import { getMachineId } from "../cosy.js";
 import { fetchWithTimeout, readResponseTextLimited } from "../network.js";
-import { credentialsFromPat } from "./pat.js";
+import { credentialsFromPat, parseExpiry } from "./pat.js";
 
 export function generatePKCE() {
   const codeVerifier = crypto.randomBytes(32).toString("base64url");
   const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
   return { codeVerifier, codeChallenge };
-}
-
-function parseExpiresAt(s?: string, expiresInSeconds?: number): number {
-  if (s) {
-    const t = Date.parse(s);
-    if (!Number.isNaN(t)) return t;
-    const ms = Number.parseInt(s, 10);
-    if (!Number.isNaN(ms) && ms > 0) return ms;
-  }
-  if (expiresInSeconds && expiresInSeconds > 0) return Date.now() + expiresInSeconds * 1000;
-  return Date.now() + 30 * 24 * 60 * 60 * 1000;
 }
 
 export function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -117,7 +106,7 @@ async function runDeviceFlow(callbacks: OAuthLoginCallbacks): Promise<OAuthCrede
       return {
         refresh: `${tokenData.refresh_token}|${tokenData.user_id}|${machineID}`,
         access: tokenData.token,
-        expires: Math.max(Date.now(), parseExpiresAt(tokenData.expires_at, tokenData.expires_in) - 5 * 60 * 1000),
+        expires: Math.max(Date.now(), parseExpiry(tokenData.expires_at, tokenData.expires_in, false, 30 * 24 * 60 * 60 * 1000) - 5 * 60 * 1000),
         userID: tokenData.user_id,
         email,
         name,
