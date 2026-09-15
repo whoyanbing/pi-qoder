@@ -50,14 +50,31 @@ export function getContentImages(msg: Message): ImageContent[] {
 }
 
 const MAX_QODER_TOOLS = 128;
-export function transformTools(tools: Tool[]): QoderTool[] {
-  const seen = new Set<string>();
+
+/** Reserve valid names first so a renamed tool cannot impersonate another tool. */
+export function createToolNameMap(names: string[]): Map<string, string> {
+  const unique = [...new Set(names)];
+  const used = new Set(unique.filter((name) => /^[a-zA-Z0-9_-]{1,64}$/.test(name)));
+  const mapping = new Map<string, string>();
+  for (const original of unique) {
+    const clean = (original || "tool").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
+    let name = clean;
+    if (name !== original) {
+      for (let i = 2; used.has(name); i++) {
+        const suffix = `_${i}`;
+        name = `${clean.slice(0, 64 - suffix.length)}${suffix}`;
+      }
+    }
+    used.add(name);
+    mapping.set(original, name);
+  }
+  return mapping;
+}
+
+export function transformTools(tools: Tool[], names = createToolNameMap(tools.map((tool) => tool.name))): QoderTool[] {
   const out: QoderTool[] = [];
   for (const t of tools) {
-    const clean = (t.name || "tool").replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "tool";
-    let name = clean;
-    for (let i = 2; seen.has(name); i++) name = `${clean.slice(0, 60)}_${i}`;
-    seen.add(name);
+    const name = names.get(t.name) ?? t.name;
     if (name !== t.name) console.warn(`[pi-qoder] tool renamed for gateway: ${t.name} -> ${name}`);
     out.push({ type: "function", function: { name, description: t.description, parameters: t.parameters } });
     if (out.length >= MAX_QODER_TOOLS) {
@@ -87,13 +104,22 @@ function toolImageNote(count: number): string {
   return `[${count} image(s) in this earlier tool result are not replayed.]`;
 }
 
-export function transformMessagesForQoder(messages: Message[], preserveAllImages = false): QoderMessage[] {
+export function transformMessagesForQoder(
+  messages: Message[],
+  preserveAllImages = false,
+  toolNames: ReadonlyMap<string, string> = new Map(),
+): QoderMessage[] {
   const normalizedMessages: QoderMessage[] = [];
+  const toolImageMessages: QoderMessage[] = [];
   const droppedToolCallIds = new Set<string>();
   const currentUserIndex = lastUserIndex(messages);
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+    if (msg.role !== "toolResult" && toolImageMessages.length > 0) {
+      normalizedMessages.push(...toolImageMessages);
+      toolImageMessages.length = 0;
+    }
     if (msg.role === "assistant" && (msg.stopReason === "error" || msg.stopReason === "aborted")) {
       for (const block of msg.content) {
         if (block.type === "toolCall" && block.id) droppedToolCallIds.add(block.id);
@@ -145,7 +171,7 @@ export function transformMessagesForQoder(messages: Message[], preserveAllImages
             id: block.id,
             type: "function",
             function: {
-              name: block.name,
+              name: toolNames.get(block.name) ?? block.name,
               arguments: typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments),
             },
           });
@@ -170,12 +196,13 @@ export function transformMessagesForQoder(messages: Message[], preserveAllImages
       });
 
       if (replayImages) {
-        normalizedMessages.push({
+        // Keep parallel tool results adjacent; attach images after the whole group.
+        toolImageMessages.push({
           role: "user",
           content: [
             {
               type: "text",
-              text: `[${images.length} image${images.length === 1 ? "" : "s"} returned by the previous tool call]`,
+              text: `[${images.length} image${images.length === 1 ? "" : "s"} returned by tool call ${msg.toolCallId}]`,
             },
             ...images.map(imageUrl),
           ],
@@ -184,6 +211,7 @@ export function transformMessagesForQoder(messages: Message[], preserveAllImages
     }
   }
 
+  normalizedMessages.push(...toolImageMessages);
   return normalizedMessages;
 }
 

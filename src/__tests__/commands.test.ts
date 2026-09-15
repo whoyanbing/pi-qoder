@@ -16,13 +16,18 @@ interface CapturedNotification {
   type?: string;
 }
 
-function makeCtx(): ExtensionCommandContext & { notifications: CapturedNotification[] } {
+function makeCtx(apiKey?: string): ExtensionCommandContext & { notifications: CapturedNotification[] } {
   const notifications: CapturedNotification[] = [];
   return {
     notifications,
     hasUI: true,
     ui: {
       notify: (message: string, type?: string) => notifications.push({ message, type }),
+    },
+    modelRegistry: {
+      getProviderAuth: async () => (apiKey ? { auth: { apiKey } } : undefined),
+      refresh: async () => ({ aborted: false, errors: new Map() }),
+      getAll: () => [],
     },
   } as unknown as ExtensionCommandContext & { notifications: CapturedNotification[] };
 }
@@ -117,15 +122,6 @@ describe("registerQoderCommands", () => {
     });
 
     it("formats quota buckets, summary, reset and manage url", async () => {
-      credentialsMock.getCachedCredentials.mockReturnValue({
-        type: "oauth",
-        access: "token-1",
-        refresh: "",
-        userID: "user-1",
-        email: "test@example.com",
-        name: "Test User",
-        machineID: "machine-1",
-      });
       globalThis.fetch = vi.fn(
         async () =>
           new Response(JSON.stringify(USAGE_RESPONSE), {
@@ -134,7 +130,7 @@ describe("registerQoderCommands", () => {
           }),
       ) as unknown as typeof fetch;
 
-      const ctx = makeCtx();
+      const ctx = makeCtx("token-1");
       await pi.commands.get("qoder.usage")!.handler("", ctx);
       expect(ctx.notifications).toHaveLength(1);
       const message = ctx.notifications[0].message;
@@ -148,26 +144,37 @@ describe("registerQoderCommands", () => {
         "https://openapi.qoder.sh/api/v2/quota/usage",
         expect.objectContaining({ method: "GET" }),
       );
+      const headers = new Headers(vi.mocked(globalThis.fetch).mock.calls[0][1]?.headers);
+      expect(headers.get("Authorization")).toBe("Bearer token-1");
     });
 
     it("surfaces fetch failures as error notifications", async () => {
-      credentialsMock.getCachedCredentials.mockReturnValue({
-        type: "oauth",
-        access: "token-1",
-        refresh: "",
-        userID: "user-1",
-        email: "test@example.com",
-        name: "Test User",
-        machineID: "machine-1",
-      });
       globalThis.fetch = vi.fn(
         async () => new Response("nope", { status: 503, statusText: "Service Unavailable" }),
       ) as unknown as typeof fetch;
 
-      const ctx = makeCtx();
+      const ctx = makeCtx("token-1");
       await pi.commands.get("qoder.usage")!.handler("", ctx);
       expect(ctx.notifications[0].type).toBe("error");
       expect(ctx.notifications[0].message).toContain("503");
+    });
+  });
+
+  describe("qoder.refresh", () => {
+    it("refreshes the live registry and reports provider failures", async () => {
+      const ctx = makeCtx("test");
+      const refresh = vi.fn().mockResolvedValue({ aborted: false, errors: new Map() });
+      ctx.modelRegistry = {
+        getProviderAuth: async () => ({ auth: { apiKey: "test" } }),
+        refresh, getAll: () => [{ id: "NewModel", provider: "qoder" }],
+      } as unknown as ExtensionCommandContext["modelRegistry"];
+      await pi.commands.get("qoder.refresh")!.handler("", ctx);
+      expect(refresh).toHaveBeenCalledWith({ providers: ["qoder"], allowNetwork: true, force: true, signal: undefined });
+      expect(ctx.notifications[0].message).toBe("Qoder catalog refreshed: 1 models.");
+
+      refresh.mockResolvedValueOnce({ aborted: false, errors: new Map([["qoder", new Error("HTTP 403")]]) });
+      await pi.commands.get("qoder.refresh")!.handler("", ctx);
+      expect(ctx.notifications[1]).toMatchObject({ type: "error", message: "Qoder refresh failed: HTTP 403" });
     });
   });
 

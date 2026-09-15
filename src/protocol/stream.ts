@@ -21,7 +21,7 @@ import { buildAuthHeaders, getMachineId } from "../cosy.js";
 import { readResponseTextLimited } from "../network.js";
 import { qoderEncodeBodyBuffer } from "./encoding.js";
 import { stripThinkingTags, ThinkingTagParser } from "./thinking.js";
-import { contentToText, getContentImages, getContentText, transformMessagesForQoder, transformTools } from "./transform.js";
+import { contentToText, createToolNameMap, getContentImages, getContentText, transformMessagesForQoder, transformTools } from "./transform.js";
 
 const sessionFallbackCache = new Map<string, string>();
 
@@ -48,6 +48,7 @@ const MAX_TOOL_ARGUMENT_BYTES = 1024 * 1024;
 
 interface ToolCallState {
   arguments: string;
+  argumentBytes: number;
   id: string;
   name: string;
   emittedStart?: boolean;
@@ -177,8 +178,17 @@ export function streamQoder(
       const qoderModel = modelConfig.key;
       const isReasoning = Boolean(modelConfig.is_reasoning || modelConfig.thinking_config);
 
+      const toolNames = createToolNameMap([
+        ...(context.tools ?? []).map((tool) => tool.name),
+        ...context.messages.flatMap((message) =>
+          message.role === "assistant" && Array.isArray(message.content)
+            ? message.content.flatMap((block) => block.type === "toolCall" ? [block.name] : [])
+            : [],
+        ),
+      ]);
+      const originalToolNames = new Map([...toolNames].map(([original, wire]) => [wire, original]));
       const preserveImages = model.input?.includes("image") ?? false;
-      const normalizedMessages = transformMessagesForQoder(context.messages, preserveImages);
+      const normalizedMessages = transformMessagesForQoder(context.messages, preserveImages, toolNames);
       const systemText = contentToText(context.systemPrompt || "");
 
       let lastUserText = "";
@@ -212,7 +222,7 @@ export function streamQoder(
       const toolsRaw =
         options?.toolChoice === "none" || !context.tools || context.tools.length === 0
           ? undefined
-          : transformTools(context.tools);
+          : transformTools(context.tools, toolNames);
       const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
 
       const requestedLevel = options?.reasoning;
@@ -577,6 +587,7 @@ export function streamQoder(
                   if (!toolCallsState[idx]) {
                     toolCallsState[idx] = {
                       arguments: "",
+                      argumentBytes: 0,
                       id: "",
                       name: "",
                       contentIndex: -1,
@@ -585,10 +596,11 @@ export function streamQoder(
                   }
                   const state = toolCallsState[idx];
                   if (tc.id) state.id = tc.id;
-                  if (tc.function?.name) state.name = tc.function.name;
+                  if (tc.function?.name) state.name = originalToolNames.get(tc.function.name) ?? tc.function.name;
                   if (tc.function?.arguments) {
                     state.arguments += tc.function.arguments;
-                    if (Buffer.byteLength(state.arguments, "utf8") > MAX_TOOL_ARGUMENT_BYTES) {
+                    state.argumentBytes += Buffer.byteLength(tc.function.arguments, "utf8");
+                    if (state.argumentBytes > MAX_TOOL_ARGUMENT_BYTES) {
                       throw new Error(`Qoder tool arguments exceeded ${MAX_TOOL_ARGUMENT_BYTES} bytes`);
                     }
                   }

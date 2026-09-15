@@ -1,4 +1,5 @@
 import type { OAuthCredentials } from "@earendil-works/pi-ai";
+import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const patEnvNames = ["QODER_API_KEY", "QODER_PERSONAL_ACCESS_TOKEN", "QODER_PAT"] as const;
@@ -74,6 +75,34 @@ describe("provider registration", () => {
     await oauth.fetchUsage(credentials);
     expect(fetchMock).toHaveBeenLastCalledWith("https://openapi.qoder.sh/api/v2/quota/usage", expect.any(Object));
   });
+});
+
+it("publishes successful model refreshes but preserves the snapshot and timestamp on failure", async () => {
+  for (const name of patEnvNames) delete process.env[name];
+  let config: ProviderConfig | undefined;
+  const { default: registerProvider } = await import("../index.js");
+  await registerProvider({
+    registerProvider: (_id: string, value: ProviderConfig) => { config = value; },
+    registerCommand: vi.fn(), on: vi.fn(),
+  } as never);
+  const publish = vi.fn(async () => true);
+  const context = {
+    credential: { type: "oauth" as const, access: "test", refresh: "refresh", expires: Date.now() + 3600000 },
+    allowNetwork: true, force: true, signal: new AbortController().signal, publish,
+  };
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+    chat: [{ key: "new-model", display_name: "New Model", enable: true }],
+  }))));
+  const models = await config!.refreshModels!(context);
+  expect(models.map((model) => model.id)).toEqual(["NewModel"]);
+  expect(publish).toHaveBeenCalledTimes(1);
+
+  publish.mockClear();
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("denied", { status: 403 })));
+  await expect(config!.refreshModels!(context)).rejects.toThrow("HTTP 403");
+  expect(publish).not.toHaveBeenCalled();
+  const { getCachedModels } = await import("../catalog.js");
+  expect(getCachedModels().map((model) => model.id)).toEqual(["NewModel"]);
 });
 
 describe("qoder-api registry", () => {

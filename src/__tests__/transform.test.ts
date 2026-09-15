@@ -235,7 +235,7 @@ describe("transformMessagesForQoder", () => {
     const parts = result[1].content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
     expect(parts[0]).toEqual({
       type: "text",
-      text: "[1 image returned by the previous tool call]",
+      text: "[1 image returned by tool call call_1]",
     });
     expect(parts[1]).toEqual({
       type: "image_url",
@@ -257,9 +257,29 @@ describe("transformMessagesForQoder", () => {
     ] as unknown as Message[];
     const result = transformMessagesForQoder(msgs);
     const parts = result[1].content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
-    expect(parts[0].text).toBe("[2 images returned by the previous tool call]");
+    expect(parts[0].text).toBe("[2 images returned by tool call call_1]");
     expect(parts[1].image_url?.url).toBe("data:image/png;base64,one");
     expect(parts[2].image_url?.url).toBe("data:image/jpeg;base64,two");
+  });
+
+  it.each([false, true])("keeps parallel image tool results adjacent (following answer: %s)", (withAnswer) => {
+    const messages = [
+      { role: "user", content: "compare" },
+      { role: "assistant", content: [
+        { type: "toolCall", id: "a", name: "read", arguments: {} },
+        { type: "toolCall", id: "b", name: "read", arguments: {} },
+      ] },
+      { role: "toolResult", toolCallId: "a", content: [{ type: "image", mimeType: "image/png", data: "A" }] },
+      { role: "toolResult", toolCallId: "b", content: [{ type: "image", mimeType: "image/png", data: "B" }] },
+      ...(withAnswer ? [{ role: "assistant", content: [{ type: "text", text: "compared" }] }] : []),
+    ] as unknown as Message[];
+    const result = transformMessagesForQoder(messages, true);
+    expect(result.map((message) => message.role)).toEqual([
+      "user", "assistant", "tool", "tool", "user", "user", ...(withAnswer ? ["assistant"] : []),
+    ]);
+    expect(result.slice(2, 4).map((message) => message.tool_call_id)).toEqual(["a", "b"]);
+    expect(JSON.stringify(result[4])).toContain("tool call a");
+    expect(JSON.stringify(result[5])).toContain("tool call b");
   });
 
   it("strips historical user images and keeps the current turn", () => {

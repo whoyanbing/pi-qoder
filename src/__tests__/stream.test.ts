@@ -264,6 +264,33 @@ describe("streamQoder", () => {
     expect(msg.content.find((c) => c.type === "toolCall")).toBeDefined();
   });
 
+  it("round-trips renamed, colliding and long tool names through definitions, history and response", async () => {
+    const names = ["foo.bar", "foo_bar", "x".repeat(65), `${"x".repeat(64)}y`];
+    const context = makeContext();
+    context.tools = names.map((name) => ({ name, description: name, parameters: { type: "object" } }));
+    context.messages.push({
+      role: "assistant",
+      content: [...names, "retired.tool"].map((name, index) => ({ type: "toolCall", id: `old_${index}`, name, arguments: {} })),
+    } as AssistantMessage);
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(qoderDecodeBody(Buffer.from(init?.body as Uint8Array).toString("utf8")).toString("utf8"));
+      const wireNames = body.tools.map((tool: { function: { name: string } }) => tool.function.name);
+      expect(new Set(wireNames).size).toBe(names.length);
+      expect(wireNames[1]).toBe("foo_bar");
+      expect(wireNames.every((name: string) => /^[a-zA-Z0-9_-]{1,64}$/.test(name))).toBe(true);
+      expect(body.messages.at(-1).tool_calls.map((call: { function: { name: string } }) => call.function.name))
+        .toEqual([...wireNames, "retired_tool"]);
+      return new Response(sseEnvelope(chunk({
+        tool_calls: wireNames.map((name: string, index: number) => ({ index, id: `new_${index}`, function: { name, arguments: "{}" } })),
+      })) + sseEnvelope(finishChunk("tool_calls")) + DONE_SSE);
+    }) as typeof fetch;
+
+    const result = await streamQoder(makeModel(), context, { apiKey: "fake" }).result();
+    expect(result.stopReason).toBe("toolUse");
+    expect(result.content.filter((block) => block.type === "toolCall").map((block) => block.name)).toEqual(names);
+    expect((context.messages.at(-1)?.content as ToolCall[])[0].name).toBe("foo.bar");
+  });
+
   it("assembles reasoning chunks before the final answer", async () => {
     const sse =
       sseEnvelope(chunk({ reasoning_content: "check " })) +
@@ -441,6 +468,19 @@ describe("streamQoder", () => {
     const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
     const error = events.find((event) => event.type === "error") as { error: AssistantMessage };
     expect(error.error.errorMessage).toContain("Invalid JSON arguments");
+    expect(events.find((event) => event.type === "done")).toBeUndefined();
+  });
+
+  it("rejects tool arguments over 1MB spread across many small fragments", async () => {
+    const fragment = `"${"a".repeat(4095)}",`;
+    const frames = Array.from(
+      { length: 300 },
+      () => sseEnvelope(chunk({ tool_calls: [{ index: 0, id: "call_big", function: { name: "bash", arguments: fragment } }] })),
+    ).join("");
+    globalThis.fetch = mockFetch(`${frames}${sseEnvelope(finishChunk("tool_calls"))}${DONE_SSE}`);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const error = events.find((event) => event.type === "error") as { error: AssistantMessage };
+    expect(error.error.errorMessage).toContain("tool arguments exceeded");
     expect(events.find((event) => event.type === "done")).toBeUndefined();
   });
 

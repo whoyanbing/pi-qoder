@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { getCachedCredentials } from "./auth/credentials.js";
 import { isPatRefresh } from "./auth/pat.js";
 import { fetchQoderUsage, type QoderProviderUsage } from "./auth/usage.js";
-import { PI_THINKING_LEVELS as THINKING_LEVELS, getCatalogCacheInfo, getCachedModels, lastCatalogRefresh, updateQoderModelsCache, type QoderModelDef } from "./catalog.js";
+import { PI_THINKING_LEVELS as THINKING_LEVELS, getCatalogCacheInfo, getCachedModels, lastCatalogRefresh, type QoderModelDef } from "./catalog.js";
 import { lastStreamDiag } from "./protocol/stream.js";
 import {
   PAT_ENV_NAMES,
@@ -137,13 +137,15 @@ export function registerQoderCommands(pi: ExtensionAPI): void {
   pi.registerCommand("qoder.usage", {
     description: "Show Qoder plan quota and usage",
     handler: async (_args, ctx) => {
-      const creds = getCachedCredentials();
-      if (!creds?.access) {
-        notify(ctx, "Qoder usage unavailable: not logged in. Run /login qoder first.", "error");
-        return;
-      }
       try {
-        const usage = await fetchQoderUsage(creds);
+        ctx.signal?.throwIfAborted();
+        const resolved = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
+        ctx.signal?.throwIfAborted();
+        if (!resolved?.auth.apiKey) throw new Error("not logged in. Run /login qoder first.");
+        const usage = await fetchQoderUsage(
+          { access: resolved.auth.apiKey, refresh: "", expires: 0 },
+          ctx.signal,
+        );
         notify(ctx, formatUsage(usage));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -164,14 +166,17 @@ export function registerQoderCommands(pi: ExtensionAPI): void {
   pi.registerCommand("qoder.refresh", {
     description: "Force refresh Qoder model catalog from server",
     handler: async (_args, ctx) => {
-      const creds = getCachedCredentials();
-      if (!creds?.access || !creds.userID) {
-        notify(ctx, "Qoder refresh unavailable: not logged in. Run /login qoder first.", "error");
-        return;
-      }
       try {
-        const models = await updateQoderModelsCache(creds.access, creds.userID, creds.name, creds.email, ctx.signal);
-        notify(ctx, models ? `Qoder catalog refreshed: ${models.length} models.` : "Qoder refresh returned no models; kept existing cache.");
+        ctx.signal?.throwIfAborted();
+        const resolved = await ctx.modelRegistry.getProviderAuth(PROVIDER_ID);
+        ctx.signal?.throwIfAborted();
+        if (!resolved?.auth.apiKey) throw new Error("not logged in. Run /login qoder first.");
+        const result = await ctx.modelRegistry.refresh({ providers: [PROVIDER_ID], allowNetwork: true, force: true, signal: ctx.signal });
+        if (result.aborted) throw new Error("Refresh cancelled");
+        const error = result.errors.get(PROVIDER_ID);
+        if (error) throw error;
+        const count = ctx.modelRegistry.getAll().filter((model) => model.provider === PROVIDER_ID).length;
+        notify(ctx, `Qoder catalog refreshed: ${count} models.`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         notify(ctx, `Qoder refresh failed: ${message}`, "error");

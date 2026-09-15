@@ -1,8 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_CONTEXT_WINDOW,
   MAX_OUTPUT_TOKENS,
@@ -257,10 +256,10 @@ function findStaticModel(modelId: string): QoderModelDef | undefined {
 }
 
 function getCachePath(): string {
-  return join(homedir(), ".pi", "agent", MODEL_CACHE_FILE);
+  return join(getAgentDir(), MODEL_CACHE_FILE);
 }
 
-let memCache: { mtimeMs: number; data: ModelCacheFile | null } | null = null;
+let memCache: { path: string; mtimeMs: number; data: ModelCacheFile | null } | null = null;
 function readCacheFile(): ModelCacheFile | null {
   const cachePath = getCachePath();
   if (!existsSync(cachePath)) {
@@ -269,12 +268,12 @@ function readCacheFile(): ModelCacheFile | null {
   }
   try {
     const mtimeMs = statSync(cachePath).mtimeMs;
-    if (memCache && memCache.mtimeMs === mtimeMs) return memCache.data;
+    if (memCache?.path === cachePath && memCache.mtimeMs === mtimeMs) return memCache.data;
     const data = JSON.parse(readFileSync(cachePath, "utf8")) as ModelCacheFile;
-    memCache = { mtimeMs, data };
+    memCache = { path: cachePath, mtimeMs, data };
     return data;
   } catch {
-    return memCache?.data ?? null;
+    return memCache?.path === cachePath ? memCache.data : null;
   }
 }
 
@@ -458,7 +457,7 @@ export async function updateQoderModelsCache(
   email: string,
   signal?: AbortSignal,
 ): Promise<QoderModelDef[] | undefined> {
-  const key = `${userID}:${authToken}`;
+  const key = `${getCachePath()}:${userID}:${authToken}`;
   const existing = catalogRefreshInflight.get(key);
   if (existing) return existing;
 
@@ -493,13 +492,13 @@ async function updateQoderModelsCacheUnlocked(
         { signal, label: "Qoder model catalog request" },
       );
       if (response.ok) break;
+      await response.body?.cancel().catch(() => {});
       if (![429, 502, 503, 504].includes(response.status) || attempt === 2) {
         lastCatalogRefresh.at = Date.now();
         lastCatalogRefresh.latencyMs = Date.now() - started;
         lastCatalogRefresh.error = `HTTP ${response.status}`;
         return undefined;
       }
-      await response.text().catch(() => "");
       await abortableDelay(500 * 2 ** attempt, signal);
     }
     if (!response?.ok) return undefined;

@@ -1,8 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { readStoredCredential } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, readStoredCredential } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
 import { isCacheStale, updateQoderModelsCache } from "../catalog.js";
 import {
@@ -25,17 +24,16 @@ export interface QoderCredentials extends OAuthCredentials {
   machineID: string;
 }
 
-const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
 let identityCache: { key: string; creds: QoderCredentials } | null = null;
 
 function setIdentityCache(key: string, creds: QoderCredentials): void {
   identityCache = { key, creds };
 }
 
-function acquireAuthLock(): () => void {
+function acquireAuthLock(authPath: string): () => void {
   for (let attempt = 1; attempt <= 10; attempt++) {
     try {
-      return lockfile.lockSync(AUTH_FILE, { realpath: false, stale: 30_000 });
+      return lockfile.lockSync(authPath, { realpath: false, stale: 30_000 });
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code) : "";
       if (code !== "ELOCKED" || attempt === 10) throw error;
@@ -51,6 +49,7 @@ function acquireAuthLock(): () => void {
  * replace an auth file that cannot be parsed.
  */
 export function saveCredentialsToAuthFile(credentials: OAuthCredentials, providerID = PROVIDER_ID): void {
+  const AUTH_FILE = join(getAgentDir(), "auth.json");
   const dir = dirname(AUTH_FILE);
   const tempPath = `${AUTH_FILE}.${process.pid}.${Date.now()}.tmp`;
   let release: (() => void) | undefined;
@@ -59,7 +58,7 @@ export function saveCredentialsToAuthFile(credentials: OAuthCredentials, provide
     if (!existsSync(AUTH_FILE)) writeFileSync(AUTH_FILE, "{}", { encoding: "utf-8", mode: 0o600 });
     // Use Pi's own proper-lockfile convention (`auth.json.lock`) so concurrent
     // Pi processes and this bootstrap writer serialize through the same lock.
-    release = acquireAuthLock();
+    release = acquireAuthLock(AUTH_FILE);
 
     let auth: Record<string, unknown> = {};
     if (existsSync(AUTH_FILE)) {
@@ -137,6 +136,16 @@ function scheduleCatalogRefresh(creds: QoderCredentials, signal?: AbortSignal): 
 export async function autoLoginFromEnvironment(signal?: AbortSignal): Promise<void> {
   const pat = getPatFromEnvironment();
   if (!pat) return;
+  // Reuse the cached exchange when the same PAT is still valid; each startup
+  // otherwise mints a new job token and rewrites auth.json.
+  const cached = getCachedCredentials();
+  if (cached?.access && cached.refresh && isPatRefresh(cached.refresh)) {
+    const { pat: cachedPat } = decodePatRefresh(cached.refresh);
+    if (cachedPat === pat && cached.expires - Date.now() > 5 * 60 * 1000) {
+      await refreshCatalogIfNeeded(cached, signal);
+      return;
+    }
+  }
   const credentials = await credentialsFromPat(pat, signal);
   saveCredentialsToAuthFile(credentials);
   await refreshCatalogIfNeeded(credentials as QoderCredentials, signal);

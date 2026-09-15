@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { QODER_CLIENT_TYPE, QODER_GATEWAY_COSY_VERSION } from "./config.js";
 
 const QODER_RSA_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
@@ -54,7 +55,7 @@ function computeSigPath(urlStr: string): string {
 }
 
 export function getMachineId(): string {
-  const paths = [join(homedir(), ".qoder", ".auth", "machine_id"), join(homedir(), ".pi", "agent", "qoder-machine-id")];
+  const paths = [join(homedir(), ".qoder", ".auth", "machine_id"), join(getAgentDir(), "qoder-machine-id")];
   for (const p of paths) {
     if (!existsSync(p)) continue;
     try {

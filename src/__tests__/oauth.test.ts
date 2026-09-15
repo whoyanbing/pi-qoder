@@ -8,32 +8,34 @@ import {
   resolveQoderIdentity,
   saveCredentialsToAuthFile,
 } from "../auth/credentials.js";
-import { credentialsFromPat, fetchUserInfo } from "../auth/pat.js";
+import { credentialsFromPat, encodePatRefresh, fetchUserInfo } from "../auth/pat.js";
 import { updateQoderModelsCache } from "../catalog.js";
 import { getPatFromEnvironment } from "../config.js";
 import { loadLiveFixture } from "./live-fixture.js";
 
 const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
 
-vi.mock("../auth/pat.js", () => ({
-  credentialsFromPat: vi.fn().mockResolvedValue({
-    access: "mock-access-token",
-    refresh: "mock-refresh-token",
-    expires: Date.now() + 3600000,
-    userID: "mock-user-123",
-    email: "test@example.com",
-    name: "Test User",
-    machineID: "mock-machine-id",
-    type: "oauth",
-  }),
-  isPatRefresh: vi.fn().mockReturnValue(false),
-  decodePatRefresh: vi.fn(),
-  fetchUserInfo: vi.fn().mockResolvedValue({
-    userID: "new-user",
-    email: "new@example.com",
-    name: "New User",
-  }),
-}));
+vi.mock("../auth/pat.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../auth/pat.js")>();
+  return {
+    ...actual,
+    credentialsFromPat: vi.fn().mockResolvedValue({
+      access: "mock-access-token",
+      refresh: "mock-refresh-token",
+      expires: Date.now() + 3600000,
+      userID: "mock-user-123",
+      email: "test@example.com",
+      name: "Test User",
+      machineID: "mock-machine-id",
+      type: "oauth",
+    }),
+    fetchUserInfo: vi.fn().mockResolvedValue({
+      userID: "new-user",
+      email: "new@example.com",
+      name: "New User",
+    }),
+  };
+});
 
 vi.mock("../catalog.js", () => ({
   updateQoderModelsCache: vi.fn().mockResolvedValue(undefined),
@@ -117,6 +119,50 @@ describe("oauth autoLoginFromEnvironment", () => {
       "test@example.com",
       undefined,
     );
+  });
+
+  it("reuses the cached exchange when the same PAT is still valid", async () => {
+    process.env.QODER_PERSONAL_ACCESS_TOKEN = "pt-same-account";
+    const auth = existsSync(AUTH_FILE) ? JSON.parse(readFileSync(AUTH_FILE, "utf8")) : {};
+    auth.qoder = {
+      type: "oauth",
+      access: "cached-access-token",
+      refresh: encodePatRefresh("pt-same-account", "job-refresh", "cached-user", "machine-1"),
+      expires: Date.now() + 3600000,
+      userID: "cached-user",
+      email: "cached@example.com",
+      name: "Cached User",
+      machineID: "machine-1",
+    };
+    writeFileSync(AUTH_FILE, JSON.stringify(auth), "utf8");
+
+    await autoLoginFromEnvironment();
+
+    expect(credentialsFromPat).not.toHaveBeenCalled();
+    expect(updateQoderModelsCache).toHaveBeenCalledWith(
+      "cached-access-token",
+      "cached-user",
+      "Cached User",
+      "cached@example.com",
+      undefined,
+    );
+  });
+
+  it("re-exchanges when the same PAT is expired", async () => {
+    process.env.QODER_PERSONAL_ACCESS_TOKEN = "pt-stale-account";
+    const auth = existsSync(AUTH_FILE) ? JSON.parse(readFileSync(AUTH_FILE, "utf8")) : {};
+    auth.qoder = {
+      type: "oauth",
+      access: "stale-access-token",
+      refresh: encodePatRefresh("pt-stale-account", "job-refresh", "stale-user", "machine-1"),
+      expires: Date.now() - 1000,
+      userID: "stale-user",
+    };
+    writeFileSync(AUTH_FILE, JSON.stringify(auth), "utf8");
+
+    await autoLoginFromEnvironment();
+
+    expect(credentialsFromPat).toHaveBeenCalledWith("pt-stale-account", undefined);
   });
 
   it("does not reuse identity metadata from a different access token", async () => {

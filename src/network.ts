@@ -107,7 +107,26 @@ export async function readResponseTextLimited(
   response: Response,
   maxBytes = MAX_ERROR_BODY_BYTES,
 ): Promise<string> {
-  // ponytail: full body read then slice, server error bodies are small
-  const text = await response.text().catch(() => "");
-  return text.length > maxBytes ? text.slice(0, maxBytes) : text;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new RangeError("maxBytes must be a non-negative integer");
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let remaining = maxBytes;
+  let text = "";
+  try {
+    while (remaining > 0) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      const chunk = value.subarray(0, remaining);
+      text += decoder.decode(chunk, { stream: true });
+      remaining -= chunk.byteLength;
+    }
+    // Do not flush a code point cut in half by the byte cap.
+    return text;
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {}
+    reader.releaseLock();
+  }
 }

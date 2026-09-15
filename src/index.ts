@@ -4,7 +4,7 @@ import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-age
 import { autoLoginFromEnvironment, getCachedCredentials, loginQoder, refreshCatalogIfNeeded, refreshQoderToken } from "./auth/credentials.js";
 import { fetchQoderUsage } from "./auth/usage.js";
 import { registerQoderCommands } from "./commands.js";
-import { getCachedModels, isCacheStale, toProviderModels, updateQoderModelsCache } from "./catalog.js";
+import { isCacheStale, lastCatalogRefresh, toProviderModels, updateQoderModelsCache } from "./catalog.js";
 import { PROVIDER_ID, PROVIDER_NAME, QODER_API, QODER_BASE_URL } from "./config.js";
 import { DEFAULT_REQUEST_TIMEOUT_MS } from "./network.js";
 import { streamQoder } from "./protocol/stream.js";
@@ -12,6 +12,8 @@ import { streamQoder } from "./protocol/stream.js";
 type OAuthConfigWithUsage = NonNullable<ProviderConfig["oauth"]> & {
   fetchUsage: (credentials: OAuthCredentials) => Promise<unknown>;
 };
+
+let bootstrapController: AbortController | undefined;
 
 function registerQoderApi(): void {
   registerApiProvider(
@@ -58,7 +60,10 @@ export default async function (pi: ExtensionAPI) {
         extra.email || cached?.email || "user@qoder.com",
         context.signal,
       );
-      const next = toProviderModels(models ?? getCachedModels());
+      if (!models) {
+        throw new Error(lastCatalogRefresh.error || "Qoder refresh returned no models; kept existing cache.");
+      }
+      const next = toProviderModels(models);
       await context.publish({
         persist: {
           models: next.map((model) => ({
@@ -77,17 +82,28 @@ export default async function (pi: ExtensionAPI) {
   registerQoderCommands(pi);
 
   // Bootstrap in background: never block pi startup on Qoder network.
+  // Abort the previous bootstrap on reload so a stale task cannot overwrite
+  // credentials or the catalog written by the new instance.
+  bootstrapController?.abort();
+  const controller = new AbortController();
+  bootstrapController = controller;
   void (async () => {
     try {
-      const startupSignal = AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS);
+      const startupSignal = AbortSignal.any([AbortSignal.timeout(DEFAULT_REQUEST_TIMEOUT_MS), controller.signal]);
       await autoLoginFromEnvironment(startupSignal);
       const credentials = getCachedCredentials();
       if (credentials?.access && credentials.userID) {
         await refreshCatalogIfNeeded(credentials, startupSignal);
       }
     } catch (error) {
+      if (controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[pi-qoder] background login/catalog refresh failed: ${message}`);
     }
   })();
+}
+
+export function __cancelBootstrapForTests(): void {
+  bootstrapController?.abort();
+  bootstrapController = undefined;
 }
