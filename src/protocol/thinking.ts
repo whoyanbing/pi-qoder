@@ -13,6 +13,8 @@ export const THINKING_TAG_VARIANTS: Array<{ open: string; close: string }> = [
 ];
 
 function getTrailingPossibleTagPrefixLength(text: string, tag: string): number {
+  // Every tag starts with "<"; without one in the tail no prefix can match.
+  if (text.lastIndexOf("<") < text.length - (tag.length - 1)) return 0;
   const maxPrefixLength = Math.min(text.length, tag.length - 1);
   for (let len = maxPrefixLength; len > 0; len--) {
     if (text.endsWith(tag.slice(0, len))) return len;
@@ -27,6 +29,8 @@ function getMaxTrailingPossibleTagPrefixLength(text: string, tags: string[]): nu
   }
   return maxLength;
 }
+
+const ALL_THINKING_TAGS = THINKING_TAG_VARIANTS.flatMap((variant) => [variant.open, variant.close]);
 
 /** Matches every open/close marker in THINKING_TAG_VARIANTS in one pass. */
 const THINKING_TAG_PATTERN = /<\/?(?:thinking|think|reasoning|thought)>/g;
@@ -144,8 +148,7 @@ export class ThinkingTagParser {
       return;
     }
 
-    const allTags = THINKING_TAG_VARIANTS.flatMap((variant) => [variant.open, variant.close]);
-    const trailingPrefixLength = getMaxTrailingPossibleTagPrefixLength(this.textBuffer, allTags);
+    const trailingPrefixLength = getMaxTrailingPossibleTagPrefixLength(this.textBuffer, ALL_THINKING_TAGS);
     const safeLen = this.textBuffer.length - trailingPrefixLength;
     if (safeLen > 0) {
       this.emitText(this.textBuffer.slice(0, safeLen));

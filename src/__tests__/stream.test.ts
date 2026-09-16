@@ -248,6 +248,29 @@ describe("streamQoder", () => {
     expect(ids[2]).not.toBe(ids[0]);
   });
 
+  it("sends images only inside messages, not duplicated into image_urls", async () => {
+    globalThis.fetch = mockFetch(SUCCESS_SSE);
+    const model = { ...makeModel("Ultimate"), input: ["text", "image"] } as Model<Api>;
+    const context = {
+      systemPrompt: "test",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "look" }, { type: "image", mimeType: "image/png", data: "AAAA" }] },
+      ],
+      tools: [],
+    } as unknown as Context;
+    await consume(streamQoder(model, context, { apiKey: "fake" }));
+
+    const init = vi.mocked(globalThis.fetch).mock.calls[0][1];
+    const body = JSON.parse(qoderDecodeBody(Buffer.from(init?.body as Uint8Array).toString("utf8")).toString("utf8")) as {
+      image_urls: unknown;
+      chat_context: { imageUrls: unknown };
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    expect(body.image_urls).toBeNull();
+    expect(body.chat_context.imageUrls).toBeNull();
+    expect(body.messages.at(-1)?.content).toContainEqual({ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } });
+  });
+
   it("reports a tool_use stop reason when the stream emits tool calls", async () => {
     const sse =
       sseEnvelope(

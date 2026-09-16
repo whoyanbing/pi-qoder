@@ -73,14 +73,22 @@ function stableChatRecordID(
   tools: unknown,
   maxTokens: number,
 ): string {
-  const parts: string[] = [model];
+  // Same digest as stableHash("qoder-record", ...parts), fed part by part so a
+  // long history is not held twice in memory.
+  const hash = crypto.createHash("sha256");
+  const add = (part: string) => {
+    hash.update("\0");
+    hash.update(part);
+  };
+  hash.update("qoder-record");
+  add(model);
   for (const msg of messages) {
-    if (msg?.role) parts.push(msg.role);
-    if (msg?.content) parts.push(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
+    if (msg?.role) add(msg.role);
+    if (msg?.content) add(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
   }
-  if (tools) parts.push(JSON.stringify(tools));
-  parts.push(`mt=${maxTokens}`);
-  return stableHash("qoder-record", ...parts);
+  if (tools) add(JSON.stringify(tools));
+  add(`mt=${maxTokens}`);
+  return hash.digest("hex").slice(0, 16);
 }
 
 function emptyUsage() {
@@ -209,7 +217,10 @@ export function streamQoder(
       // Same-process reuse: same model+user+first-prompt shares server session for caching;
       // process restart generates new ids so sessions never collide across restarts.
       const firstUserMsg = context.messages.find((m) => m.role === "user");
-      const fingerprint = firstUserMsg ? `${getContentText(firstUserMsg)}|images=${getContentImages(firstUserMsg).length}` : "";
+      // Hash the first prompt so the in-process cache does not retain up to 200 full prompts.
+      const fingerprint = firstUserMsg
+        ? stableHash("qoder-first-prompt", getContentText(firstUserMsg), `images=${getContentImages(firstUserMsg).length}`)
+        : "";
       const sessionID = options?.sessionId
         ? `${stablePart}-${options.sessionId}`
         : resolveSessionID(stablePart, fingerprint);
@@ -245,15 +256,6 @@ export function streamQoder(
         parameters.enable_thinking = false;
       }
 
-      const imageUrls: string[] = [];
-      for (const m of normalizedMessages) {
-        const c = m.content;
-        if (Array.isArray(c)) {
-          for (const part of c) {
-            if (part.type === "image_url" && part.image_url?.url) imageUrls.push(part.image_url.url);
-          }
-        }
-      }
       let reqBody: Record<string, unknown> = {
         request_id: crypto.randomUUID(),
         request_set_id: recordID,
@@ -270,7 +272,9 @@ export function streamQoder(
         task_id: "common",
         code_language: "",
         chat_prompt: lastUserText,
-        image_urls: imageUrls.length > 0 ? imageUrls : null,
+        // Images travel only inside `messages`, as in qodercli. Repeating them here
+        // and in chat_context tripled the body (and its signing cost) per image.
+        image_urls: null,
         aliyun_user_type: "",
         system: systemText,
         messages: systemText ? [{ role: "system", content: systemText }, ...normalizedMessages] : normalizedMessages,
@@ -278,7 +282,7 @@ export function streamQoder(
         parameters,
         chat_context: {
           chatPrompt: lastUserText,
-          imageUrls: imageUrls.length > 0 ? imageUrls : null,
+          imageUrls: null,
           extra: {
             context: [],
             modelConfig: {
@@ -334,7 +338,11 @@ export function streamQoder(
         : options?.signal;
       const armIdleTimeout = () => {
         if (!idleController || !timeoutMs) return;
-        if (idleTimer) clearTimeout(idleTimer);
+        // refresh() re-arms the existing timer without allocating one per SSE chunk.
+        if (idleTimer) {
+          idleTimer.refresh();
+          return;
+        }
         idleTimer = setTimeout(
           () => idleController.abort(new Error(`Qoder stream idle timeout after ${timeoutMs}ms`)),
           timeoutMs,
@@ -449,7 +457,6 @@ export function streamQoder(
           appendBuffer(decoder.decode());
           if (bufferStart < buffer.length && !buffer.endsWith("\n")) appendBuffer("\n");
         } else {
-          armIdleTimeout();
           appendBuffer(decoder.decode(value, { stream: true }));
         }
         // UTF-8 encodes every UTF-16 code unit as at most 3 bytes, so below

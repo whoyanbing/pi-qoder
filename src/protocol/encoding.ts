@@ -31,9 +31,18 @@ export function qoderEncodeBody(plaintext: string | Buffer): string {
 }
 
 export function qoderEncodeBodyBuffer(plaintext: string | Buffer): Buffer {
-  const std = Buffer.isBuffer(plaintext) ? plaintext.toString("base64") : Buffer.from(plaintext).toString("base64");
-  if (std.length === 0) return Buffer.alloc(0);
-  return remapRearranged(Buffer.from(std, "latin1"), ENCODE_MAP);
+  const std = (Buffer.isBuffer(plaintext) ? plaintext : Buffer.from(plaintext)).toString("base64");
+  const n = std.length;
+  if (n === 0) return Buffer.alloc(0);
+  // Write the rotated base64 text straight into the output and remap in place,
+  // avoiding an intermediate latin1 copy of a potentially multi-MB body.
+  const a = Math.floor(n / 3);
+  const out = Buffer.allocUnsafe(n);
+  let o = out.write(std.slice(n - a), 0, "latin1");
+  o += out.write(std.slice(a, n - a), o, "latin1");
+  out.write(std.slice(0, a), o, "latin1");
+  for (let i = 0; i < n; i++) out[i] = ENCODE_MAP[out[i]];
+  return out;
 }
 
 export function qoderDecodeBody(encoded: string): Buffer {

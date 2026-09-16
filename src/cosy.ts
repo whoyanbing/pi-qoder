@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import crypto from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -35,10 +36,13 @@ export interface CosyCredentials {
   machineID?: string;
 }
 
+// Parse the PEM once; publicEncrypt would otherwise re-parse it on every request.
+const QODER_RSA_KEY_OBJECT = crypto.createPublicKey(QODER_RSA_PUBLIC_KEY);
+
 function rsaEncryptBase64(data: Buffer | string): string {
   return crypto
     .publicEncrypt(
-      { key: QODER_RSA_PUBLIC_KEY, padding: crypto.constants.RSA_PKCS1_PADDING },
+      { key: QODER_RSA_KEY_OBJECT, padding: crypto.constants.RSA_PKCS1_PADDING },
       typeof data === "string" ? Buffer.from(data) : data,
     )
     .toString("base64");
@@ -107,8 +111,12 @@ export function buildAuthHeaders(
   ).toString("base64");
 
   const sigPath = computeSigPath(requestURL);
-  const bodyStr = body ? (Buffer.isBuffer(body) ? body.toString("utf8") : body) : "";
-  const sig = crypto.createHash("md5").update(`${payloadB64}\n${cosyKey}\n${timestamp}\n${bodyStr}\n${sigPath}`).digest("hex");
+  // Hash incrementally: the chat body can be many MB, and joining it into one
+  // string would copy it twice. Valid UTF-8 buffers hash identically to their
+  // decoded string; anything else keeps the lossy decode the signature expects.
+  const sigHash = crypto.createHash("md5").update(`${payloadB64}\n${cosyKey}\n${timestamp}\n`);
+  if (body) sigHash.update(Buffer.isBuffer(body) && !isUtf8(body) ? body.toString("utf8") : body);
+  const sig = sigHash.update(`\n${sigPath}`).digest("hex");
   const bodyHash = crypto
     .createHash("md5")
     .update(body || "")
