@@ -353,31 +353,34 @@ export function getCachedModels(): QoderModelDef[] {
   return staticModels;
 }
 
+// Lowercased id / key / display-name id -> entry, built once per parsed cache file.
+const configIndexes = new WeakMap<ModelCacheFile, Map<string, QoderModelEntry>>();
+
+function getConfigIndex(data: ModelCacheFile): Map<string, QoderModelEntry> {
+  let index = configIndexes.get(data);
+  if (index) return index;
+  index = new Map();
+  const configs = data.configs ?? {};
+  const add = (name: string | undefined, entry: QoderModelEntry) => {
+    const lower = name?.toLowerCase();
+    if (lower && !index!.has(lower)) index!.set(lower, entry);
+  };
+  // Insertion order keeps the old precedence: exact config keys, then display names, then upstream keys.
+  const entries = Object.entries(configs).filter(([, entry]) => entry && typeof entry === "object");
+  for (const [key, entry] of entries) add(key, entry);
+  for (const [, entry] of entries) if (entry.display_name) add(toQoderModelId(entry.display_name), entry);
+  for (const [, entry] of entries) if (typeof entry.key === "string") add(entry.key, entry);
+  configIndexes.set(data, index);
+  return index;
+}
+
 export function getCachedModelConfig(modelId: string): QoderModelEntry | null {
   const data = readCacheFile();
-  const lower = modelId.toLowerCase();
   const configs = data?.configs;
 
-  if (configs) {
-    const direct = configs[modelId];
+  if (data && configs) {
+    const direct = configs[modelId] ?? getConfigIndex(data).get(modelId.toLowerCase());
     if (direct) return withMaxContextAsDefault(direct);
-
-    for (const [key, entry] of Object.entries(configs)) {
-      if (!entry || typeof entry !== "object") continue;
-      if (key.toLowerCase() === lower) return withMaxContextAsDefault(entry);
-      if (toQoderModelId(entry.display_name) === modelId) return withMaxContextAsDefault(entry);
-      if (typeof entry.key === "string" && entry.key.toLowerCase() === lower) return withMaxContextAsDefault(entry);
-    }
-  }
-
-  if (data && Array.isArray(data.models) && configs) {
-    const ciModel = data.models.find((m) => m.id.toLowerCase() === lower);
-    if (ciModel) {
-      const cfg =
-        configs[ciModel.id] ||
-        Object.values(configs).find((entry) => entry && toQoderModelId(entry.display_name) === ciModel.id);
-      if (cfg) return withMaxContextAsDefault(cfg);
-    }
   }
 
   const staticModel = findStaticModel(modelId);

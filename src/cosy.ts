@@ -58,8 +58,19 @@ function computeSigPath(urlStr: string): string {
   return parsed.pathname.startsWith("/algo") ? parsed.pathname.slice("/algo".length) : parsed.pathname;
 }
 
+// Keyed by the resolved paths so a changed HOME or agent dir still re-reads.
+let machineIdMemo: { key: string; id: string } | null = null;
+
 export function getMachineId(): string {
   const paths = [join(homedir(), ".qoder", ".auth", "machine_id"), join(getAgentDir(), "qoder-machine-id")];
+  const key = paths.join("\0");
+  if (machineIdMemo?.key === key) return machineIdMemo.id;
+  const id = readOrCreateMachineId(paths);
+  machineIdMemo = { key, id };
+  return id;
+}
+
+function readOrCreateMachineId(paths: string[]): string {
   for (const p of paths) {
     if (!existsSync(p)) continue;
     try {

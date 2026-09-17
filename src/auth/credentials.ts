@@ -102,11 +102,15 @@ export async function resolveQoderIdentity(
   providerID = PROVIDER_ID,
   signal?: AbortSignal,
 ): Promise<QoderCredentials> {
-  const cached = getCachedCredentials(providerID);
-  if (cached?.userID && cached.access === accessToken) return cached;
-
+  // Check memory first: reading auth.json is a sync read + parse on every request.
   const cacheKey = `${providerID}:${accessToken}`;
   if (identityCache?.key === cacheKey && identityCache.creds.userID) return identityCache.creds;
+
+  const cached = getCachedCredentials(providerID);
+  if (cached?.userID && cached.access === accessToken) {
+    setIdentityCache(cacheKey, cached);
+    return cached;
+  }
 
   const info = await fetchUserInfo(accessToken, signal);
   const creds: QoderCredentials = {
