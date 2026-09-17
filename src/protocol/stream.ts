@@ -67,28 +67,44 @@ function stableHash(prefix: string, ...inputs: string[]): string {
   return hash.digest("hex").slice(0, 16);
 }
 
-function stableChatRecordID(
-  model: string,
-  messages: Array<{ role?: string; content?: unknown }>,
-  tools: unknown,
-  maxTokens: number,
-): string {
-  // Same digest as stableHash("qoder-record", ...parts), fed part by part so a
-  // long history is not held twice in memory.
-  const hash = crypto.createHash("sha256");
-  const add = (part: string) => {
-    hash.update("\0");
-    hash.update(part);
-  };
-  hash.update("qoder-record");
-  add(model);
-  for (const msg of messages) {
-    if (msg?.role) add(msg.role);
-    if (msg?.content) add(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
+/**
+ * qodercli keeps one request_set_id for every model call made while answering a
+ * prompt, and the gateway's model queue tracks sets. Key it on the latest user
+ * turn so tool-call follow-ups and retries share a set and a new prompt starts one.
+ */
+function requestSetID(sessionID: string, messages: Context["messages"]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === "user") return stableHash("qoder-request-set", sessionID, String(i), String(message.timestamp ?? ""));
   }
-  if (tools) add(JSON.stringify(tools));
-  add(`mt=${maxTokens}`);
-  return hash.digest("hex").slice(0, 16);
+  return crypto.randomUUID();
+}
+
+/** Non-JSON notice frames that qodercli skips. */
+function isNoticeFrame(data: string): boolean {
+  return data === "[NOT_EXCEED_QUOTA]" || data.startsWith("[EXCEED_QUOTA]") || data.startsWith("[NOTIFICATIONS]");
+}
+
+const POST_DONE_DRAIN_MS = 2_000;
+
+/**
+ * The gateway ends the body a few ms after [DONE] (after an `event:finish` frame).
+ * Cancelling an unfinished HTTP/1.1 body destroys the socket, so read the tail in
+ * the background instead: the connection returns to the pool and the next request
+ * skips a new TLS handshake. The timer stops a stalled body from pinning the socket.
+ */
+function drainAfterDone(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  const timer = setTimeout(() => void reader.cancel().catch(() => {}), POST_DONE_DRAIN_MS);
+  timer.unref?.();
+  void (async () => {
+    try {
+      while (!(await reader.read()).done);
+    } catch {
+      // The response was already delivered; a reset or abort here changes nothing.
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
 }
 
 function emptyUsage() {
@@ -234,7 +250,6 @@ export function streamQoder(
         options?.toolChoice === "none" || !context.tools || context.tools.length === 0
           ? undefined
           : transformTools(context.tools, toolNames);
-      const recordID = stableChatRecordID(qoderModel, normalizedMessages, toolsRaw, maxTokens);
 
       const requestedLevel = options?.reasoning;
       const clamped = requestedLevel ? clampThinkingLevel(model, requestedLevel) : undefined;
@@ -256,10 +271,12 @@ export function streamQoder(
         parameters.enable_thinking = false;
       }
 
+      // qodercli uses one random id for request_id and chat_record_id.
+      const requestID = crypto.randomUUID();
       let reqBody: Record<string, unknown> = {
-        request_id: crypto.randomUUID(),
-        request_set_id: recordID,
-        chat_record_id: recordID,
+        request_id: requestID,
+        request_set_id: requestSetID(sessionID, context.messages),
+        chat_record_id: requestID,
         session_id: sessionID,
         stream: true,
         chat_task: "FREE_INPUT",
@@ -270,18 +287,15 @@ export function streamQoder(
         session_type: "qodercli",
         agent_id: "agent_common",
         task_id: "common",
-        code_language: "",
-        chat_prompt: lastUserText,
-        // Images travel only inside `messages`, as in qodercli. Repeating them here
-        // and in chat_context tripled the body (and its signing cost) per image.
-        image_urls: null,
         aliyun_user_type: "",
         system: systemText,
         messages: systemText ? [{ role: "system", content: systemText }, ...normalizedMessages] : normalizedMessages,
         tools: toolsRaw || [],
         parameters,
+        // Same shape as qodercli 1.1.54: images and the prompt travel in `messages`;
+        // chat_context carries the prompt only as text/originalContent.
         chat_context: {
-          chatPrompt: lastUserText,
+          chatPrompt: "",
           imageUrls: null,
           extra: {
             context: [],
@@ -317,15 +331,16 @@ export function streamQoder(
       const effectiveModelKey = typeof modelKeyAfterPayload === "string" && modelKeyAfterPayload ? modelKeyAfterPayload : qoderModel;
       const modelSourceAfterPayload = (reqBody.model_config as { source?: unknown } | undefined)?.source;
       const effectiveSource = typeof modelSourceAfterPayload === "string" && modelSourceAfterPayload ? modelSourceAfterPayload : String(modelConfig.source || "system");
-      const encodedBody = qoderEncodeBodyBuffer(JSON.stringify(reqBody));
       const chatURL = getChatURL();
-      const headers = buildAuthHeaders(encodedBody, chatURL, {
-        userID,
-        authToken: accessToken,
-        name,
-        email,
-        machineID,
-      });
+      const signRequest = () => {
+        const encodedBody = qoderEncodeBodyBuffer(JSON.stringify(reqBody));
+        const headers = requestHeaders(options?.headers, {
+          "X-Model-Key": effectiveModelKey,
+          "X-Model-Source": effectiveSource,
+          ...buildAuthHeaders(encodedBody, chatURL, { userID, authToken: accessToken, name, email, machineID }),
+        });
+        return { encodedBody, headers };
+      };
 
       // Pi supplies its configured HTTP idle timeout. Keep a finite fallback for
       // direct compat/SDK consumers that call the provider without Pi's wrapper.
@@ -351,11 +366,6 @@ export function streamQoder(
       };
 
       const doFetch = options?.fetch ?? globalThis.fetch;
-      const chatHeaders = requestHeaders(options?.headers, {
-        "X-Model-Key": effectiveModelKey,
-        "X-Model-Source": effectiveSource,
-        ...headers,
-      });
       const publishResponse = async (res: Response) => {
         await options?.onResponse?.(
           {
@@ -369,11 +379,19 @@ export function streamQoder(
       let response: Response | undefined;
       let lastErrText = "";
       for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+          // Like qodercli, give every attempt fresh ids (it treats 403 code 103 as a
+          // duplicate request), which means re-encoding and re-signing the body.
+          const retryID = crypto.randomUUID();
+          reqBody.request_id = retryID;
+          reqBody.chat_record_id = retryID;
+        }
+        const { encodedBody, headers } = signRequest();
         armIdleTimeout();
         try {
           response = await doFetch(chatURL, {
             method: "POST",
-            headers: chatHeaders,
+            headers,
             body: encodedBody as unknown as BodyInit,
             signal: requestSignal,
           });
@@ -438,8 +456,8 @@ export function streamQoder(
 
       stream.push({ type: "start", partial: output });
 
-      // Qoder's gateway often keeps the HTTP body open after `data: [DONE]`.
-      // Stop the read loop on the sentinel instead of waiting for the socket.
+      // Qoder's gateway can keep the HTTP body open after `data: [DONE]`. Finish on
+      // the sentinel instead of waiting for the socket; drainAfterDone reads the tail.
       let sawDone = false;
       let sawFinishReason = false;
 
@@ -478,6 +496,7 @@ export function streamQoder(
             sawDone = true;
             break;
           }
+          if (isNoticeFrame(dataStr)) continue;
 
           try {
             const envelope = JSON.parse(dataStr) as {
@@ -493,7 +512,7 @@ export function streamQoder(
               sawDone = true;
               break;
             }
-            if (!innerStr) continue;
+            if (!innerStr || isNoticeFrame(innerStr)) continue;
 
             const inner = JSON.parse(innerStr) as {
               id?: string;
@@ -661,11 +680,10 @@ export function streamQoder(
       }
 
       if (!sawDone && !sawFinishReason) {
-        throw new Error("Qoder connection closed before the response completed");
+        // Keep "connection lost" in the text: pi's auto-retry matches on error wording.
+        throw new Error("Qoder connection lost before the response completed");
       }
 
-      await reader.cancel().catch(() => {});
-      activeReader = undefined;
       thinkingParser?.finalize();
       finishContentBlock();
       finishThinkingBlock();
@@ -731,6 +749,8 @@ export function streamQoder(
         message: output,
       });
       stream.end();
+      activeReader = undefined;
+      drainAfterDone(reader);
     } catch (e: unknown) {
       output.stopReason = options?.signal?.aborted ? "aborted" : "error";
       output.errorMessage = e instanceof Error ? e.message : String(e);

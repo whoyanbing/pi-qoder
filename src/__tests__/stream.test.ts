@@ -7,6 +7,7 @@ import type {
   Model,
   ToolCall,
 } from "@earendil-works/pi-ai";
+import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { qoderDecodeBody } from "../protocol/encoding.js";
 import { __clearSessionFallbackCacheForTests, streamQoder } from "../protocol/stream.js";
@@ -76,6 +77,10 @@ function mockFetch(body: string): typeof fetch {
     headers: { "content-type": "text/event-stream" },
   });
   return vi.fn(async () => response) as unknown as typeof fetch;
+}
+
+function decodeRequestBody(init: RequestInit | undefined): Record<string, unknown> {
+  return JSON.parse(qoderDecodeBody(Buffer.from(init?.body as Uint8Array).toString("utf8")).toString("utf8"));
 }
 
 function makeModel(id = "Lite"): Model<Api> {
@@ -248,6 +253,70 @@ describe("streamQoder", () => {
     expect(ids[2]).not.toBe(ids[0]);
   });
 
+  it("carries the prompt like qodercli: in messages and chat_context text, not chat_prompt", async () => {
+    globalThis.fetch = mockFetch(SUCCESS_SSE);
+    await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const init = vi.mocked(globalThis.fetch).mock.calls[0][1];
+    const body = decodeRequestBody(init);
+    expect(body).not.toHaveProperty("chat_prompt");
+    expect(body).not.toHaveProperty("code_language");
+    expect(body.chat_context).toMatchObject({ text: "hi", chatPrompt: "", extra: { originalContent: "hi" } });
+  });
+
+  it("uses one random id per request and keeps request_set_id for the whole prompt", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      bodies.push(decodeRequestBody(init));
+      return new Response(SUCCESS_SSE, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }) as unknown as typeof fetch;
+    const prompt = { role: "user", content: "hi", timestamp: 1 };
+    const toolTurn = [
+      { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }], stopReason: "toolUse" },
+      { role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "data" }], isError: false, timestamp: 2 },
+    ];
+    const contexts = [
+      [prompt],
+      [prompt, ...toolTurn],
+      [prompt, ...toolTurn, { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" }, { role: "user", content: "next", timestamp: 3 }],
+    ];
+    for (const messages of contexts) {
+      const context = { systemPrompt: "test", messages, tools: [] } as unknown as Context;
+      await consume(streamQoder(makeModel(), context, { apiKey: "fake", sessionId: "s1" }));
+    }
+
+    for (const body of bodies) expect(body.chat_record_id).toBe(body.request_id);
+    expect(new Set(bodies.map((body) => body.request_id)).size).toBe(3);
+    expect(bodies[1].request_set_id).toBe(bodies[0].request_set_id);
+    expect(bodies[2].request_set_id).not.toBe(bodies[0].request_set_id);
+  });
+
+  it("re-signs retries with fresh request ids", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const attempts: Array<{ body: Record<string, unknown>; bodyHash: string | null; sig: string | null }> = [];
+      globalThis.fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        attempts.push({ body: decodeRequestBody(init), bodyHash: headers.get("Cosy-Bodyhash"), sig: headers.get("Authorization") });
+        if (attempts.length === 1) return new Response("busy", { status: 503, statusText: "Service Unavailable" });
+        return new Response(SUCCESS_SSE, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }) as unknown as typeof fetch;
+
+      const result = streamQoder(makeModel(), makeContext(), { apiKey: "fake" }).result();
+      await vi.advanceTimersByTimeAsync(500);
+      expect((await result).stopReason).toBe("stop");
+
+      expect(attempts).toHaveLength(2);
+      const [first, retry] = attempts;
+      expect(retry.body.request_id).not.toBe(first.body.request_id);
+      expect(retry.body.chat_record_id).toBe(retry.body.request_id);
+      expect(retry.body.request_set_id).toBe(first.body.request_set_id);
+      expect(retry.bodyHash).not.toBe(first.bodyHash);
+      expect(retry.sig).not.toBe(first.sig);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("sends images only inside messages, not duplicated into image_urls", async () => {
     globalThis.fetch = mockFetch(SUCCESS_SSE);
     const model = { ...makeModel("Ultimate"), input: ["text", "image"] } as Model<Api>;
@@ -262,11 +331,10 @@ describe("streamQoder", () => {
 
     const init = vi.mocked(globalThis.fetch).mock.calls[0][1];
     const body = JSON.parse(qoderDecodeBody(Buffer.from(init?.body as Uint8Array).toString("utf8")).toString("utf8")) as {
-      image_urls: unknown;
       chat_context: { imageUrls: unknown };
       messages: Array<{ role: string; content: unknown }>;
     };
-    expect(body.image_urls).toBeNull();
+    expect(body).not.toHaveProperty("image_urls");
     expect(body.chat_context.imageUrls).toBeNull();
     expect(body.messages.at(-1)?.content).toContainEqual({ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } });
   });
@@ -423,11 +491,51 @@ describe("streamQoder", () => {
   });
 
   it("finishes when the gateway sends [DONE] but keeps the body open", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const sse = sseEnvelope(chunk({ content: "OK", role: "assistant" })) + sseEnvelope(finishChunk("stop")) + DONE_SSE;
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(sse));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      globalThis.fetch = vi.fn(
+        async () => new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      ) as unknown as typeof fetch;
+
+      const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+      const done = events.find((e) => e.type === "done");
+      expect(done, "expected a done event even though the body stayed open").toBeDefined();
+      const text = (done as { message: AssistantMessage }).message.content.find((c) => c.type === "text");
+      expect(text && "text" in text ? text.text : "").toBe("OK");
+      // The stalled tail is read in the background and only given up after the drain window.
+      expect(cancelled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(cancelled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reads the tail after [DONE] instead of cancelling, so the connection can be reused", async () => {
+    const encoder = new TextEncoder();
     const sse = sseEnvelope(chunk({ content: "OK", role: "assistant" })) + sseEnvelope(finishChunk("stop")) + DONE_SSE;
+    let pulls = 0;
     let cancelled = false;
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new TextEncoder().encode(sse));
+        controller.enqueue(encoder.encode(sse));
+      },
+      // First pull supplies the gateway's finish frame; the second (reached only if the
+      // frame was read) ends the body.
+      pull(controller) {
+        pulls++;
+        if (pulls === 1) controller.enqueue(encoder.encode('event:finish\ndata:{"totalDuration":1}\n\n'));
+        else controller.close();
       },
       cancel() {
         cancelled = true;
@@ -438,11 +546,25 @@ describe("streamQoder", () => {
     ) as unknown as typeof fetch;
 
     const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
-    const done = events.find((e) => e.type === "done");
-    expect(done, "expected a done event even though the body stayed open").toBeDefined();
-    const text = (done as { message: AssistantMessage }).message.content.find((c) => c.type === "text");
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+    await vi.waitFor(() => expect(pulls).toBe(2));
+    expect(cancelled).toBe(false);
+  });
+
+  it("skips quota and notification notice frames", async () => {
+    const sse =
+      sseEnvelope("[NOT_EXCEED_QUOTA]") +
+      sseEnvelope('[NOTIFICATIONS]{"items":[]}') +
+      "data:[EXCEED_QUOTA]{}\n\n" +
+      sseEnvelope(chunk({ content: "OK", role: "assistant" })) +
+      sseEnvelope(finishChunk("stop")) +
+      DONE_SSE;
+    globalThis.fetch = mockFetch(sse);
+    const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
+    const done = events.find((e) => e.type === "done") as { message: AssistantMessage } | undefined;
+    expect(done, "notice frames must not fail the stream").toBeDefined();
+    const text = done?.message.content.find((c) => c.type === "text");
     expect(text && "text" in text ? text.text : "").toBe("OK");
-    expect(cancelled).toBe(true);
   });
 
   it("finishes on a bare data: [DONE] line with the body left open", async () => {
@@ -473,12 +595,13 @@ describe("streamQoder", () => {
     expect(types.indexOf("text_end")).toBeLessThan(types.indexOf("done"));
   });
 
-  it("reports an error when the body closes without DONE or a finish reason", async () => {
+  it("reports a retryable error when the body closes without DONE or a finish reason", async () => {
     globalThis.fetch = mockFetch(sseEnvelope(chunk({ content: "truncated", role: "assistant" })));
     const events = await consume(streamQoder(makeModel(), makeContext(), { apiKey: "fake" }));
     const error = events.find((event) => event.type === "error") as { error: AssistantMessage };
     expect(error.error.stopReason).toBe("error");
-    expect(error.error.errorMessage).toContain("closed before the response completed");
+    expect(error.error.errorMessage).toContain("lost before the response completed");
+    expect(isRetryableAssistantError(error.error), "pi should auto-retry a dropped stream").toBe(true);
     expect(events.find((event) => event.type === "done")).toBeUndefined();
   });
 
